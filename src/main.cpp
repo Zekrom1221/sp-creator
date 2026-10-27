@@ -277,16 +277,31 @@ bool isRetired(StartPosObject* obj) {
     return obj && std::find(r.begin(), r.end(), obj) != r.end();
 }
 
+// Where the SP's startpos object stands: where the player takes control.
+CCPoint objectPosition(StartPoint const& sp) {
+    return {sp.x, sp.frames.back().p1.y};
+}
+
+// Restarts move objects back to where they started, which for the SPs' objects (added by the mod, not
+// loaded with the level) is 0,0 in some levels (Jumper). setStartPos would fix that, but then the player
+// crashes into the object (BPATA): they're put back in place after each restart instead.
+void placeObjects() {
+    for (auto const& sp : g_session.sps) {
+        if (sp->object) sp->object->setPosition(objectPosition(*sp));
+    }
+}
+
 // Adds the SP's startpos object to the level, where the player takes control. Going through addObject
 // lets other mods' addObject hooks (startpos switchers) collect it like the level's startposes.
 void addObjectFor(PlayLayer* pl, StartPoint& sp) {
-    auto obj = StartPosObject::create();
+    // Made the way the level's own startposes are (object 31): StartPosObject::create() alone leaves its
+    // object ID at 0, which switchers skip.
+    auto obj = typeinfo_cast<StartPosObject*>(GameObject::createWithKey(31));
     if (!obj || !obj->m_startSettings) {
         log::error("SP {}: no startpos object", sp.id);
         return;
     }
-    obj->m_objectID = 31;  // as the level's startposes have; switchers look for it
-    obj->setPosition({sp.x, sp.frames.back().p1.y});
+    obj->setPosition(objectPosition(sp));
     auto startPos = pl->m_startPosObject;
     bool testMode = pl->m_isTestMode;
     pl->addObject(obj);
@@ -880,8 +895,9 @@ bool smokeCompat(PlayLayer* pl) {
                         sp ? fmt::format(" (SP {}, {:.2f}%)", sp->id, sp->percent) : ""));
                 }
             }
-            log::info("Smoke test: startposes in the level: {} [{}], object ID {}, level length {:.1f}, timestamp {}",
+            log::info("Smoke test: startposes in the level: {} [{}], object ID {}, type {}, level length {:.1f}, timestamp {}",
                 found.size(), fmt::join(found, ", "), sps.empty() ? 0 : sps.front()->object->m_objectID,
+                sps.empty() ? -1 : static_cast<int>(sps.front()->object->m_objectType),
                 pl->m_levelLength, pl->m_level->m_timestamp);
             foreignSwitch(pl, 1);
             logRestart(pl, "another switcher, forward");
@@ -1342,6 +1358,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         applyActiveSP(this);
         PlayLayer::resetLevel();
         g_rec = Recording{};
+        placeObjects();
         startPlayback(this);
         auto& s = g_session;
         if (s.lastCheckpoint) s.lastCheckpointRetains = s.lastCheckpoint->retainCount();
@@ -1355,7 +1372,8 @@ class $modify(SPCPlayLayer, PlayLayer) {
         // as they count it: otherwise the attempt would also touch the stretch before the SP.
         auto sp = g_session.spawning;
         if (!sp && g_play.sp && g_play.controlling && g_play.step == 0) sp = g_play.sp;
-        if (sp && sp->object && m_checkpointArray->count() == 0) return startPosPercent(this, sp->object->getPositionX());
+        // From where the object stands, not where it is: the restart may have moved it (see placeObjects).
+        if (sp && sp->object && m_checkpointArray->count() == 0) return startPosPercent(this, objectPosition(*sp).x);
         return PlayLayer::getCurrentPercent();
     }
 
@@ -1392,7 +1410,15 @@ class $modify(SPCPlayLayer, PlayLayer) {
                 Loader::get()->queueInMainThread(nextSmokePhase);
                 return;
             }
-            if (g_smoke.active) return;  // smoke test noclip
+            if (g_smoke.active) {
+                // Smoke test noclip; the first hits of each attempt go to the log.
+                if (g_rec.hits <= 3) {
+                    log::info("Smoke test: hit object {} at {:.1f},{:.1f}, player at {:.1f},{:.1f}", object ? object->m_objectID : 0,
+                        object ? object->getPositionX() : 0.f, object ? object->getPositionY() : 0.f,
+                        player->m_position.x, player->m_position.y);
+                }
+                return;
+            }
         }
         PlayLayer::destroyPlayer(player, object);
     }
