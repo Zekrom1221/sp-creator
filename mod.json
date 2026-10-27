@@ -1,0 +1,95 @@
+{
+    "geode": "5.11.2",
+    "gd": {
+        "win": "2.2081"
+    },
+    "version": "0.1.0",
+    "id": "zekrom.sp-creator",
+    "name": "SP Creator",
+    "developer": "Zekrom",
+    "description": "Place your own startpos in any online level, with a short auto part before you take control",
+    "dependencies": {
+        "sabe.persistenceapi": ">=v1.2.0",
+        "geode.node-ids": ">=v1.23.0"
+    },
+    "resources": {
+        "fonts": {
+            "spcFont": {
+                "path": "resources/fonts/Ubuntu-Bold.ttf",
+                "size": 90,
+                "charset": "32-126,171,187,1025,1040-1103,1105,8212,8226"
+            }
+        }
+    },
+    "settings": {
+        "language": {
+            "type": "string",
+            "default": "Auto",
+            "one-of": ["Auto", "English", "Russian"],
+            "name": "Language",
+            "description": "Language of the mod's messages and SP list. <cy>Auto</c> follows the Windows language."
+        },
+        "place-sp": {
+            "type": "keybind",
+            "default": "V",
+            "name": "Place SP",
+            "description": "Place an SP where you are now. Starting from it replays the last <cy>auto part length</c> seconds of your run, then gives you control here.",
+            "category": "gameplay"
+        },
+        "switcher": {
+            "type": "bool",
+            "default": true,
+            "name": "SP switcher keys",
+            "description": "Switch SPs with the two keys below. Other startpos switchers see the SPs too: turn this off if you switch with one of them."
+        },
+        "prev-sp": {
+            "type": "keybind",
+            "default": "OEMComma",
+            "name": "Previous SP",
+            "description": "Restart from the previous SP (or the level start)",
+            "category": "gameplay"
+        },
+        "next-sp": {
+            "type": "keybind",
+            "default": "OEMPeriod",
+            "name": "Next SP",
+            "description": "Restart from the next SP (or the level start)",
+            "category": "gameplay"
+        },
+        "delete-sp": {
+            "type": "keybind",
+            "default": "Delete",
+            "name": "Delete SP",
+            "description": "Delete the SP you start from and restart from the previous one (or the level start)",
+            "category": "gameplay"
+        },
+        "auto-part-length": {
+            "type": "float",
+            "default": 0.6,
+            "min": 0.2,
+            "max": 2.0,
+            "name": "Auto part length",
+            "description": "Seconds the mod plays for you before handing over control. Applies to SPs placed after the change."
+        },
+        "block-input": {
+            "type": "bool",
+            "default": true,
+            "name": "Block control in the auto part",
+            "description": "On: your clicks in the auto part are ignored until it ends. Off: your first click ends the auto part and you play from there."
+        },
+        "checkpoint-interval": {
+            "type": "int",
+            "default": 24,
+            "min": 4,
+            "max": 120,
+            "name": "Checkpoint interval",
+            "description": "Physics steps (240 per second) between hidden checkpoints. Lower: the auto part is closer to its set length. Higher: less work while you play."
+        },
+        "guide-player": {
+            "type": "bool",
+            "default": true,
+            "name": "Guide the auto part",
+            "description": "Put the player back on the recorded path every step of the auto part, in case the replay drifts"
+        }
+    }
+}
