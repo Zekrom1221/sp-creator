@@ -51,6 +51,9 @@ namespace storage {
     bool remove(StartPoint const& sp);
     // Smoke test: deletes the level's SP folder and its versions.
     void removeAll();
+    // The level is left: its folder goes if nothing is kept for it, no SPs and no versions (with versions,
+    // their "for an older level version" comes from its level.json). Versions without SPs go too.
+    void leave();
 
     // Export and import (Transfer.cpp), in the open level.
     struct LevelInfo {
@@ -116,16 +119,17 @@ namespace storage {
         bool open = false;             // the open level: its SPs stay
         std::filesystem::path dir;     // its own folder (it may be gone, with versions left)
         int sps = 0;
-        uintmax_t spBytes = 0;         // all files of its own folder
+        uintmax_t spBytes = 0;         // all files of its own folder, 0 when it holds nothing of the player's
         std::vector<Version> versions; // newest first; `fits` against its own folder's level.json
         uintmax_t versionBytes = 0;
         uintmax_t bytes() const { return spBytes + versionBytes; }
     };
     // Levels with SPs or versions, the biggest first. Folders with nothing of the player's in them (only what
-    // the mod writes when a level is entered, or a version made empty) are deleted on the way, but the open
-    // level's: SPs placed there go into it.
+    // the mod writes when a level is entered, or a version made empty) are left out: they go when their
+    // level is left (leave()). Nothing is deleted here.
     std::vector<StoredLevel> storedLevels();
     // A level's own folder, its SPs with it; never the open level's.
     bool removeLevelSPs(StoredLevel const& level);
+    // With the level's last version, its own folder goes too if it holds no SPs, but the open level's.
     bool removeStoredVersion(StoredLevel const& level, Version const& version);
 }

@@ -25,7 +25,7 @@ Open one to bring its SPs back, rename it, or delete the ones you don't need: no
 SPs that a version holds already aren't saved twice: that version moves to the top instead.
 
 <cy>SP storage</c> in the mod's settings lists the SPs and versions of all levels, the biggest first. Pick levels,
-or SPs and versions of one level, and delete them to free up space. The SPs of the level you're in stay.
+or SPs and versions of one level, and delete them to free up space.
 
 ## With other mods
 

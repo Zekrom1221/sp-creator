@@ -763,6 +763,8 @@ struct SmokeTest {
     // The storage manager on a copy of a root (the player's SPs), through its buttons; nothing else.
     bool storageUI = false;
     std::string storageRoot;
+    // At the level start: out of it, as a player leaves it; what stays of the root's folders.
+    bool quit = false;
     // UI: the file dialogs through the buttons instead of renaming and the lists (tools/answer_dialogs.ps1).
     bool dialogs = false;
     unsigned int waitFrom = 0;
@@ -896,8 +898,10 @@ void startSmokeTest() {
     auto ref = root["reference"].asString();
     if (ref.isOk()) g_smoke.reference = loadReference(ref.unwrap());
     // Its SPs go to a folder of their own; without SPs to place it tests the ones saved there.
-    storage::setRoot(root["storage_root"].asString().unwrapOr("levels-smoketest"));
+    g_smoke.storageRoot = root["storage_root"].asString().unwrapOr("levels-smoketest");
+    storage::setRoot(g_smoke.storageRoot);
     g_smoke.cleanup = root["cleanup"].asBool().unwrapOr(false);
+    g_smoke.quit = root["quit"].asBool().unwrapOr(false);
     g_smoke.ui = root["ui"].asBool().unwrapOr(false);
     g_smoke.externalSeconds = static_cast<int>(root["external_seconds"].asInt().unwrapOr(0));
     // Letters and digits: "E,E,Q".
@@ -927,7 +931,6 @@ void startSmokeTest() {
             std::filesystem::copy(dir / from, dir / name, std::filesystem::copy_options::recursive, ec);
             log::info("Smoke test: storage: {} copied to {} ({})", from, name, ec ? ec.message() : "ok");
             g_smoke.storageUI = !ec;
-            g_smoke.storageRoot = name;
         }
         else log::error("Smoke test: storage_ui needs a storage_root of its own (levels-smoketest...)");
     }
@@ -1595,10 +1598,10 @@ std::string describeStorage() {
     return fmt::format("{} [{}]", parts.size(), fmt::join(parts, "; "));
 }
 
-std::vector<std::string> storageFolders() {
+std::vector<std::string> storageFolders(std::string const& name = g_smoke.storageRoot) {
     std::vector<std::string> names;
     std::error_code ec;
-    auto root = Mod::get()->getSaveDir() / g_smoke.storageRoot;
+    auto root = Mod::get()->getSaveDir() / name;
     for (auto it = std::filesystem::directory_iterator(root, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
         names.push_back(utils::string::pathToString(it->path().filename()));
     }
@@ -1726,10 +1729,20 @@ void smokeStorage(int stage) {
     }
 }
 
+void smokeQuit() {
+    auto root = g_smoke.storageRoot;  // the test's state goes with the level
+    log::info("Smoke test: folders before leaving: {}", fmt::join(storageFolders(root), ", "));
+    if (auto pl = PlayLayer::get()) pl->onQuit();
+    afterFrames(120, [root] {
+        log::info("Smoke test: folders after leaving: {}; storage: {}", fmt::join(storageFolders(root), ", "), describeStorage());
+        finishSmokeTest();
+    });
+}
+
 void nextSmokePhase() {
     auto pl = PlayLayer::get();
     auto& t = g_smoke;
-    if (!pl || t.storageUI) return;
+    if (!pl || t.storageUI || t.quit) return;
     if (t.externalSeconds > 0 && !t.externalDone) {
         t.externalDone = t.externalOn = true;
         log::info("Smoke test: {} s for other mods' keys, {} to press", t.externalSeconds, t.externalKeys.size());
@@ -2106,6 +2119,9 @@ class $modify(SPCPlayLayer, PlayLayer) {
         if (g_smoke.active && g_smoke.storageUI) {
             this->runAction(CCSequence::create(CCDelayTime::create(1.f), CallFuncExt::create([] { smokeStorage(0); }), nullptr));
         }
+        if (g_smoke.active && g_smoke.quit) {
+            this->runAction(CCSequence::create(CCDelayTime::create(1.f), CallFuncExt::create([] { smokeQuit(); }), nullptr));
+        }
     }
 
     void resetLevel() {
@@ -2145,6 +2161,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
             g_smokeTakeover = false;
         }
         saveUnsaved();
+        storage::leave();
         // Checkpoints point into the level's objects: let go of them while the level still exists.
         g_play = Playback{};
         g_rec = Recording{};

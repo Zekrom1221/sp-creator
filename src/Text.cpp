@@ -97,7 +97,7 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"No SPs saved yet", "Сохранённых SP пока нет"},
     {"{}: SPs {}, versions {}", "{}: SP {}, версий {}"},
     {"open now: its SPs stay", "открыт сейчас: его SP остаются"},
-    {"{} in all. Versions come back in the level: SP list, Versions", "Всего {}. Вернуть версию — в уровне: список SP, «Версии»"},
+    {"{} in all", "Всего {}"},
     {"Current SPs: {}, {}", "Текущие SP: {}, {}"},
     {"for an older level version", "для старой версии уровня"},
     {"Select all", "Выбрать все"},

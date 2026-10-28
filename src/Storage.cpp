@@ -1071,6 +1071,17 @@ bool removeFolder(std::filesystem::path const& dir) {
     return !ec;
 }
 
+// A level's own folder once nothing is kept for it: no SPs in it, no versions (those without SPs go first).
+void removeIfNothingKept(std::filesystem::path const& dir) {
+    auto versions = versionsOf(dir, matjson::Value::object());
+    std::erase_if(versions, [](Version const& v) { return v.sps == 0 && onlyModFiles(v.dir) && removeFolder(v.dir); });
+    if (versions.empty() && onlyModFiles(dir)) removeFolder(dir);
+}
+
+}
+
+void leave() {
+    if (!g_level.dir.empty()) removeIfNothingKept(g_level.dir);
 }
 
 std::vector<StoredLevel> storedLevels() {
@@ -1091,11 +1102,8 @@ std::vector<StoredLevel> storedLevels() {
         level.open = isOpenLevel(key, level.dir);
         auto info = file::readJson(level.dir / "level.json");
         std::error_code ec2;
-        bool own = std::filesystem::is_directory(level.dir, ec2);
-        if (own && !level.open && onlyModFiles(level.dir)) {
-            log::info("Storage: {} holds no SPs", key);
-            own = !removeFolder(level.dir);
-        }
+        // Without SPs in it, it holds what the mod writes on entering the level: nothing to free.
+        bool own = std::filesystem::is_directory(level.dir, ec2) && !onlyModFiles(level.dir);
         if (own) {
             for (auto f = std::filesystem::directory_iterator(level.dir, ec2); !ec2 && f != std::filesystem::directory_iterator();
                  f.increment(ec2)) {
@@ -1110,9 +1118,7 @@ std::vector<StoredLevel> storedLevels() {
         level.versions = versionsOf(level.dir, info.isOk() ? info.unwrap() : matjson::Value::object());
         std::erase_if(level.versions, [&](Version& v) {
             if (!info.isOk()) v.fits = true;
-            if (v.sps > 0 || !onlyModFiles(v.dir)) return false;
-            log::info("Storage: {} holds no SPs", v.dir);
-            return removeFolder(v.dir);
+            return v.sps == 0 && onlyModFiles(v.dir);
         });
         for (auto const& v : level.versions) level.versionBytes += v.bytes;
         if (info.isOk()) level.name = info.unwrap()["name"].asString().unwrapOr("");
@@ -1140,7 +1146,9 @@ bool removeStoredVersion(StoredLevel const& level, Version const& version) {
         log::error("Storage: not deleting {}: not a version of {}", version.dir, level.key);
         return false;
     }
-    return removeFolder(version.dir);
+    if (!removeFolder(version.dir)) return false;
+    if (isStoredFolder(level.dir, level.key, false) && !isOpenLevel(level.key, level.dir)) removeIfNothingKept(level.dir);
+    return true;
 }
 
 }
