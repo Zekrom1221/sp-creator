@@ -87,6 +87,23 @@ namespace text {
         VersionUnreadable,
         RenameVersion,
         VersionNotRenamed,
+        // The storage manager.
+        StorageTitle,
+        StorageTotal,     // {levels} {size}
+        StorageEmpty,
+        StorageLevelInfo, // {size} {SPs} {versions}
+        StorageOpenLevel,
+        StorageLevelTotal, // {size}
+        StorageCurrent,   // {count} {size}
+        StorageOtherVersion,
+        SelectAll,
+        DeleteVersions,
+        DeleteEntirely,
+        DeletePicked,
+        StorageConfirm,   // {size}
+        StorageDeleted,   // {size}
+        StorageNotAll,    // {size} {not deleted}
+        StorageNothing,
         Kilobytes,        // {size}
         Megabytes,        // {size}
         Count,

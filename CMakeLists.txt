@@ -9,6 +9,7 @@ add_library(${PROJECT_NAME} SHARED
     src/main.cpp
     src/SPList.cpp
     src/Storage.cpp
+    src/StorageList.cpp
     src/Text.cpp
     src/Transfer.cpp
 )

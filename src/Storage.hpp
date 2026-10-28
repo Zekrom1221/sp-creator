@@ -107,4 +107,25 @@ namespace storage {
     bool removeVersion(Version const& version);
     // An empty name takes the version's name away.
     bool renameVersion(Version const& version, std::string const& name);
+
+    // The storage manager (StorageList.cpp): every level's SPs and versions, a level open or not.
+    struct StoredLevel {
+        std::string key;               // its folder's name: online-123, main-3-ldm, editor-...
+        std::string name;              // from level.json; the key without one
+        bool lowDetail = false;        // SPs for Low Detail Mode
+        bool open = false;             // the open level: its SPs stay
+        std::filesystem::path dir;     // its own folder (it may be gone, with versions left)
+        int sps = 0;
+        uintmax_t spBytes = 0;         // all files of its own folder
+        std::vector<Version> versions; // newest first; `fits` against its own folder's level.json
+        uintmax_t versionBytes = 0;
+        uintmax_t bytes() const { return spBytes + versionBytes; }
+    };
+    // Levels with SPs or versions, the biggest first. Folders with nothing of the player's in them (only what
+    // the mod writes when a level is entered, or a version made empty) are deleted on the way, but the open
+    // level's: SPs placed there go into it.
+    std::vector<StoredLevel> storedLevels();
+    // A level's own folder, its SPs with it; never the open level's.
+    bool removeLevelSPs(StoredLevel const& level);
+    bool removeStoredVersion(StoredLevel const& level, Version const& version);
 }

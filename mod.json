@@ -30,6 +30,11 @@
             "name": "Language",
             "description": "Language of the mod's messages and SP list. <cy>Auto</c> follows the Windows language."
         },
+        "storage": {
+            "type": "custom:storage",
+            "name": "SP storage",
+            "description": "SPs and versions of all levels, the biggest first: pick what you don't need and delete it. The open level's SPs stay. Versions come back in their level: SP list, <cy>Versions</c>."
+        },
         "place-sp": {
             "type": "keybind",
             "default": "V",

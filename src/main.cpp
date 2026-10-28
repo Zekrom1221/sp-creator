@@ -3,6 +3,7 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
+#include <Geode/ui/GeodeUI.hpp>
 #include <Geode/utils/file.hpp>
 
 #include "Core.hpp"
@@ -759,6 +760,9 @@ struct SmokeTest {
     bool exported = false;
     std::string importFrom;
     bool checkSaved = false;  // at the level start: what an earlier run saved (SPs, versions, names)
+    // The storage manager on a copy of a root (the player's SPs), through its buttons; nothing else.
+    bool storageUI = false;
+    std::string storageRoot;
     // UI: the file dialogs through the buttons instead of renaming and the lists (tools/answer_dialogs.ps1).
     bool dialogs = false;
     unsigned int waitFrom = 0;
@@ -912,6 +916,21 @@ void startSmokeTest() {
     g_smoke.exportTo = root["export_to"].asString().unwrapOr("");
     g_smoke.importFrom = root["import_from"].asString().unwrapOr("");
     g_smoke.checkSaved = root["check_saved"].asBool().unwrapOr(false);
+    if (root["storage_ui"].asBool().unwrapOr(false)) {
+        auto dir = Mod::get()->getSaveDir();
+        auto name = root["storage_root"].asString().unwrapOr("");
+        auto from = root["storage_from"].asString().unwrapOr("levels");
+        // Its copy is deleted from: never a root the player's SPs are in.
+        if (name.starts_with("levels-smoketest")) {
+            std::error_code ec;
+            std::filesystem::remove_all(dir / name, ec);
+            std::filesystem::copy(dir / from, dir / name, std::filesystem::copy_options::recursive, ec);
+            log::info("Smoke test: storage: {} copied to {} ({})", from, name, ec ? ec.message() : "ok");
+            g_smoke.storageUI = !ec;
+            g_smoke.storageRoot = name;
+        }
+        else log::error("Smoke test: storage_ui needs a storage_root of its own (levels-smoketest...)");
+    }
     g_smoke.dialogs = root["dialogs"].asBool().unwrapOr(false);
     if (g_smoke.placeAtX.empty()) g_smoke.stepsLeft = 60;
     log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}", id,
@@ -1553,10 +1572,164 @@ void smokeUI(int stage) {
     }
 }
 
+// Frames go on across scenes, unlike a scene's actions.
+void afterFrames(int frames, std::function<void()> then) {
+    Loader::get()->queueInMainThread([frames, then = std::move(then)]() mutable {
+        if (frames <= 0) return then();
+        afterFrames(frames - 1, std::move(then));
+    });
+}
+
+void pressToggle(std::string_view id) {
+    auto toggler = typeinfo_cast<CCMenuItemToggler*>(CCScene::get()->getChildByIDRecursive(id));
+    log::info("Smoke test: ticking {}: {}", id, toggler ? "found" : "not there");
+    if (toggler) toggler->activate();
+}
+
+std::string describeStorage() {
+    std::vector<std::string> parts;
+    for (auto const& l : storage::storedLevels()) {
+        parts.push_back(fmt::format("{} \"{}\"{}{}: {} SPs, {} KB; {} versions, {} KB", l.key, l.name, l.lowDetail ? " LDM" : "",
+            l.open ? " (open)" : "", l.sps, l.spBytes / 1024, l.versions.size(), l.versionBytes / 1024));
+    }
+    return fmt::format("{} [{}]", parts.size(), fmt::join(parts, "; "));
+}
+
+std::vector<std::string> storageFolders() {
+    std::vector<std::string> names;
+    std::error_code ec;
+    auto root = Mod::get()->getSaveDir() / g_smoke.storageRoot;
+    for (auto it = std::filesystem::directory_iterator(root, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        names.push_back(utils::string::pathToString(it->path().filename()));
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+// Index in the storage list (biggest first) of the first level `pred` takes, -1 if none.
+template <class F>
+int storageIndex(F pred) {
+    auto levels = storage::storedLevels();
+    for (size_t i = 0; i < levels.size(); i++) {
+        if (pred(levels[i])) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+void closeTopPopup() {
+    FLAlertLayer* top = nullptr;
+    for (auto child : CCArrayExt<CCNode*>(CCScene::get()->getChildren())) {
+        if (auto popup = typeinfo_cast<FLAlertLayer*>(child)) top = popup;
+    }
+    if (top) top->keyBackClicked();
+}
+
+// The storage manager on a copy of the player's SPs: from the mod's settings, through its buttons.
+void smokeStorage(int stage) {
+    static std::string key;  // the level with versions it works on
+    auto next = [stage](float delay = 0.6f) {
+        CCScene::get()->runAction(CCSequence::create(CCDelayTime::create(delay),
+            CallFuncExt::create([stage] { smokeStorage(stage + 1); }), nullptr));
+    };
+    auto id = [](std::string_view what) { return fmt::format("{}/{}", Mod::get()->getID(), what); };
+    switch (stage) {
+        case 0:
+            // From the pause menu, as a player would.
+            if (auto pl = PlayLayer::get()) {
+                g_smoke.pausing = true;
+                pl->pauseGame(false);
+                g_smoke.pausing = false;
+            }
+            log::info("Smoke test: storage folders: {}", fmt::join(storageFolders(), ", "));
+            log::info("Smoke test: storage: {}", describeStorage());
+            log::info("Smoke test: storage folders after looking: {}", fmt::join(storageFolders(), ", "));
+            openSettingsPopup(Mod::get(), false);
+            return next();
+        case 1:
+            captureScreen("smoke-settings.png");
+            pressButton(id("storage-button"));
+            return next();
+        case 2: {
+            captureScreen("smoke-storage.png");
+            int i = storageIndex([](auto const& l) { return l.versions.size() >= 2 && !l.open; });
+            if (i < 0) i = storageIndex([](auto const& l) { return !l.versions.empty() && !l.open; });
+            if (i < 0) {
+                log::error("Smoke test: storage: no level with versions");
+                return finishSmokeTest();
+            }
+            key = storage::storedLevels()[i].key;
+            log::info("Smoke test: storage: opening {}", key);
+            pressButton(id(fmt::format("storage-open-{}", i)));
+            return next();
+        }
+        case 3:
+            captureScreen("smoke-storage-level.png");
+            pressToggle(id("storage-pick-version-0"));
+            g_lastNotice.clear();
+            pressButton(id("storage-level-delete-picked"));
+            return next(0.5f);
+        case 4:
+            log::info("Smoke test: storage: first click: notice \"{}\"", g_lastNotice);
+            captureScreen("smoke-storage-confirm.png");
+            pressButton(id("storage-level-delete-picked"));
+            log::info("Smoke test: storage: second click: notice \"{}\", {}", g_lastNotice, describeStorage());
+            return next();
+        case 5:
+            captureScreen("smoke-storage-level-after.png");
+            closeTopPopup();
+            return next();
+        case 6: {
+            int i = storageIndex([](auto const& l) { return l.key == key; });
+            pressToggle(id(fmt::format("storage-pick-{}", i)));
+            pressButton(id("storage-delete-versions"));
+            pressButton(id("storage-delete-versions"));
+            log::info("Smoke test: storage: versions of {} deleted: notice \"{}\", {}", key, g_lastNotice, describeStorage());
+            int open = storageIndex([](auto const& l) { return l.open; });
+            pressButton(id(fmt::format("storage-open-{}", open)));
+            return next();
+        }
+        case 7:
+            captureScreen("smoke-storage-open.png");
+            pressButton(id("storage-level-delete-entirely"));
+            pressButton(id("storage-level-delete-entirely"));
+            log::info("Smoke test: storage: the open level entirely: notice \"{}\", {}", g_lastNotice, describeStorage());
+            closeTopPopup();
+            return next();
+        case 8: {
+            pressButton(id("storage-select-all"));
+            pressButton(id("storage-delete-entirely"));
+            pressButton(id("storage-delete-entirely"));
+            log::info("Smoke test: storage: all levels entirely: notice \"{}\", {}, folders {}", g_lastNotice, describeStorage(),
+                fmt::join(storageFolders(), ", "));
+            auto levels = storage::storedLevels();
+            int open = storageIndex([](auto const& l) { return l.open; });
+            if (open >= 0) {
+                auto const& l = levels[open];
+                storage::Version outside;
+                outside.dir = l.dir.parent_path().parent_path() / "levels";
+                log::info("Smoke test: storage: deleting the open level's SPs: {}; a folder outside as a version: {}",
+                    storage::removeLevelSPs(l), storage::removeStoredVersion(l, outside));
+            }
+            log::info("Smoke test: storage: the open level's SPs: {} in the session", g_session.sps.size());
+            return next();
+        }
+        case 9: {
+            captureScreen("smoke-storage-end.png");
+            // Out of the level: none of them is the open one any more.
+            if (auto pl = PlayLayer::get()) pl->onQuit();
+            afterFrames(120, [] {
+                log::info("Smoke test: storage from the menu: {}", describeStorage());
+                finishSmokeTest();
+            });
+            return;
+        }
+    }
+}
+
 void nextSmokePhase() {
     auto pl = PlayLayer::get();
     auto& t = g_smoke;
-    if (!pl) return;
+    if (!pl || t.storageUI) return;
     if (t.externalSeconds > 0 && !t.externalDone) {
         t.externalDone = t.externalOn = true;
         log::info("Smoke test: {} s for other mods' keys, {} to press", t.externalSeconds, t.externalKeys.size());
@@ -1930,6 +2103,9 @@ class $modify(SPCPlayLayer, PlayLayer) {
         notifyLoaded(loaded, g_session.sps.size());
         if (g_smoke.active && !g_smoke.importFrom.empty()) smokeImport();
         if (g_smoke.active && g_smoke.checkSaved) smokeCheckSaved();
+        if (g_smoke.active && g_smoke.storageUI) {
+            this->runAction(CCSequence::create(CCDelayTime::create(1.f), CallFuncExt::create([] { smokeStorage(0); }), nullptr));
+        }
     }
 
     void resetLevel() {

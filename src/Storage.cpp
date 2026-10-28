@@ -25,6 +25,7 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <map>
 
 using namespace geode::prelude;
 using namespace persistenceAPI;
@@ -61,6 +62,9 @@ struct Level {
     std::string name;
     matjson::Value info;        // as in level.json
 } g_level;
+
+// The open level's folder name, set before load() can give up on it (its SPs not loaded, nor saved).
+std::string g_openKey;
 
 // persistenceAPI::Stream opens files by a std::string path, which MSVC reads in the ANSI code page: a
 // save folder with letters outside it (a Cyrillic Windows user name) wouldn't open. This opens by path.
@@ -523,6 +527,22 @@ std::string nameOf(std::filesystem::path const& path) {
     return std::string(u8.begin(), u8.end());
 }
 
+// The level key of a version folder's name ("online-1-replaced-1700000000-2": "online-1"), "" if it isn't one.
+std::string versionKeyOf(std::string const& name) {
+    auto digits = [](std::string_view s) { return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; }); };
+    for (auto why : {OLD, REPLACED}) {
+        auto mark = fmt::format("-{}-", why);
+        auto at = name.rfind(mark);
+        if (at == std::string::npos || at == 0) continue;
+        auto rest = std::string_view(name).substr(at + mark.size());
+        auto dash = rest.find('-');
+        if (digits(rest.substr(0, dash)) && (dash == std::string_view::npos || digits(rest.substr(dash + 1)))) {
+            return name.substr(0, at);
+        }
+    }
+    return "";
+}
+
 // The folders asideName() made for the level folder `dir`, with what they hold; `fits` against `info`.
 std::vector<storage::Version> versionsOf(std::filesystem::path const& dir, matjson::Value const& info) {
     std::vector<storage::Version> out;
@@ -542,7 +562,7 @@ std::vector<storage::Version> versionsOf(std::filesystem::path const& dir, matjs
                 timeAt = prefix.size();
             }
         }
-        if (timeAt == 0) continue;
+        if (timeAt == 0 || versionKeyOf(name) != key) continue;
         long long time = 0;
         std::from_chars(name.data() + timeAt, name.data() + name.size(), time);
         v.time = static_cast<std::time_t>(time);
@@ -597,9 +617,11 @@ void beforeCreatingObjects() {
 Loaded load(PlayLayer* pl) {
     Loaded out;
     g_level = {};
+    g_openKey.clear();
     auto plainKey = levelKey(pl->m_level);
     if (plainKey.empty()) return out;
     auto key = lowDetail(pl) ? plainKey + std::string(LOW_DETAIL_SUFFIX) : plainKey;
+    g_openKey = key;
     // The game adds its anticheat spike (a spike at 0,105) after the level's objects, with an ID one past
     // its place in m_objects. Give it the ID of its place, which no other object has (the check below
     // makes sure), so that references to it load too.
@@ -1008,6 +1030,117 @@ void removeAll() {
     std::filesystem::remove_all(g_level.dir, ec);
     log::info("Removed {} and its versions ({})", g_level.dir, ec ? ec.message() : "ok");
     g_level = {};
+}
+
+namespace {
+
+std::filesystem::path rootDir() {
+    return Mod::get()->getSaveDir() / g_root;
+}
+
+// Nothing in the folder but what the mod writes on its own: no SP files, nothing else of the player's.
+bool onlyModFiles(std::filesystem::path const& dir) {
+    std::error_code ec;
+    auto it = std::filesystem::directory_iterator(dir, ec);
+    if (ec) return false;
+    for (; !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        auto name = nameOf(it->path());
+        if (name == "level.json" || name == "names.json" || name == VERSION_FILE || it->path().extension() == ".tmp") continue;
+        return false;
+    }
+    return !ec;
+}
+
+// The folder of a level (`key`), or one of its versions, right in the storage root.
+bool isStoredFolder(std::filesystem::path const& dir, std::string const& key, bool version) {
+    if (dir.parent_path() != rootDir()) return false;
+    auto name = nameOf(dir);
+    return version ? versionKeyOf(name) == key : name == key && versionKeyOf(name).empty();
+}
+
+// The level being played now (g_level stays as it was once it's left).
+bool isOpenLevel(std::string const& key, std::filesystem::path const& dir) {
+    if (!PlayLayer::get()) return false;
+    return key == g_openKey || (!g_level.dir.empty() && dir == g_level.dir);
+}
+
+bool removeFolder(std::filesystem::path const& dir) {
+    std::error_code ec;
+    auto removed = std::filesystem::remove_all(dir, ec);
+    log::info("Storage: {} deleted: {} files ({})", dir, removed, ec ? ec.message() : "ok");
+    return !ec;
+}
+
+}
+
+std::vector<StoredLevel> storedLevels() {
+    auto root = rootDir();
+    std::map<std::string, StoredLevel> byKey;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(root, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        std::error_code ec2;
+        if (!it->is_directory(ec2)) continue;
+        auto name = nameOf(it->path());
+        auto key = versionKeyOf(name);
+        byKey[key.empty() ? name : key].key = key.empty() ? name : key;
+    }
+    std::vector<StoredLevel> out;
+    for (auto& [key, level] : byKey) {
+        level.dir = root / std::filesystem::path(std::u8string(key.begin(), key.end()));
+        level.lowDetail = key.ends_with(LOW_DETAIL_SUFFIX);
+        level.open = isOpenLevel(key, level.dir);
+        auto info = file::readJson(level.dir / "level.json");
+        std::error_code ec2;
+        bool own = std::filesystem::is_directory(level.dir, ec2);
+        if (own && !level.open && onlyModFiles(level.dir)) {
+            log::info("Storage: {} holds no SPs", key);
+            own = !removeFolder(level.dir);
+        }
+        if (own) {
+            for (auto f = std::filesystem::directory_iterator(level.dir, ec2); !ec2 && f != std::filesystem::directory_iterator();
+                 f.increment(ec2)) {
+                std::error_code ec3;
+                if (!f->is_regular_file(ec3)) continue;
+                auto size = f->file_size(ec3);
+                if (!ec3) level.spBytes += size;
+                if (idFromName(f->path()) > 0) level.sps++;
+            }
+        }
+        // Against the level version it was last played in; without that, none is said not to fit.
+        level.versions = versionsOf(level.dir, info.isOk() ? info.unwrap() : matjson::Value::object());
+        std::erase_if(level.versions, [&](Version& v) {
+            if (!info.isOk()) v.fits = true;
+            if (v.sps > 0 || !onlyModFiles(v.dir)) return false;
+            log::info("Storage: {} holds no SPs", v.dir);
+            return removeFolder(v.dir);
+        });
+        for (auto const& v : level.versions) level.versionBytes += v.bytes;
+        if (info.isOk()) level.name = info.unwrap()["name"].asString().unwrapOr("");
+        for (auto const& v : level.versions) {
+            if (!level.name.empty()) break;
+            if (auto saved = file::readJson(v.dir / "level.json"); saved.isOk()) level.name = saved.unwrap()["name"].asString().unwrapOr("");
+        }
+        if (level.name.empty()) level.name = key;
+        if (own || !level.versions.empty()) out.push_back(std::move(level));
+    }
+    std::sort(out.begin(), out.end(), [](auto const& a, auto const& b) { return a.bytes() > b.bytes(); });
+    return out;
+}
+
+bool removeLevelSPs(StoredLevel const& level) {
+    if (!isStoredFolder(level.dir, level.key, false) || isOpenLevel(level.key, level.dir)) {
+        log::error("Storage: not deleting {}", level.dir);
+        return false;
+    }
+    return removeFolder(level.dir);
+}
+
+bool removeStoredVersion(StoredLevel const& level, Version const& version) {
+    if (!isStoredFolder(version.dir, level.key, true)) {
+        log::error("Storage: not deleting {}: not a version of {}", version.dir, level.key);
+        return false;
+    }
+    return removeFolder(version.dir);
 }
 
 }
