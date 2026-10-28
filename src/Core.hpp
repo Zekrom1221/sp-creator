@@ -47,6 +47,7 @@ namespace core {
         int added = 0, failed = 0;
         int notMoved = 0;  // replacing: SPs of the level that couldn't be set aside or deleted
         bool saved = false;  // replacing: the level's SPs went to a version
+        bool existing = false;  // saved: a version had them already (the newest now)
     };
     // Adds SPs from files to the level; replacing, all of the level's own SPs go once some of the new
     // ones are in. If some failed, they go to a version even when deleting them was asked.

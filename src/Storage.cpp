@@ -515,6 +515,9 @@ std::filesystem::path asideName(std::filesystem::path const& dir, std::string_vi
     }
 }
 
+// In a version's folder: the name the player gave it.
+constexpr char const* VERSION_FILE = "version.json";
+
 std::string nameOf(std::filesystem::path const& path) {
     auto u8 = path.filename().u8string();
     return std::string(u8.begin(), u8.end());
@@ -554,10 +557,18 @@ std::vector<storage::Version> versionsOf(std::filesystem::path const& dir, matjs
         }
         auto saved = file::readJson(v.dir / "level.json");
         v.fits = saved.isOk() && sameLevel(saved.unwrap(), info);
+        if (auto meta = file::readJson(v.dir / VERSION_FILE); meta.isOk()) {
+            auto given = meta.unwrap()["name"].asString().unwrapOr("");
+            if (given.size() <= MAX_NAME_BYTES) v.name = std::move(given);
+        }
         out.push_back(std::move(v));
     }
-    // In the same second, the one with the "-n" asideName() added is newer.
-    std::sort(out.begin(), out.end(), [](auto const& a, auto const& b) { return a.time != b.time ? a.time > b.time : a.dir > b.dir; });
+    // In the same second, the one with the "-n" asideName() added is newer, a longer n newer still ("-10" after "-9").
+    std::sort(out.begin(), out.end(), [](auto const& a, auto const& b) {
+        if (a.time != b.time) return a.time > b.time;
+        auto lengthA = a.dir.native().size(), lengthB = b.dir.native().size();
+        return lengthA != lengthB ? lengthA > lengthB : a.dir > b.dir;
+    });
     return out;
 }
 
@@ -847,15 +858,56 @@ std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files,
     return added;
 }
 
-std::vector<std::shared_ptr<StartPoint>> setAside(std::vector<std::shared_ptr<StartPoint>> const& sps) {
-    std::vector<std::shared_ptr<StartPoint>> moved;
-    if (g_level.dir.empty() || sps.empty()) return moved;
+// A version that fits holding just `sps`: the same files, byte for byte, under the same names. A copy
+// damaged on disk doesn't match, so the SPs never go in favour of a broken one.
+std::optional<Version> sameVersion(std::vector<std::shared_ptr<StartPoint>> const& sps) {
+    using Entry = std::pair<ByteVector, std::string>;
+    std::vector<Entry> own;
+    for (auto const& sp : sps) {
+        auto bytes = file::readBinary(spPath(sp->id));
+        if (bytes.isErr()) return std::nullopt;
+        own.push_back({std::move(bytes).unwrap(), sp->name});
+    }
+    std::sort(own.begin(), own.end());
+    for (auto const& v : versions()) {
+        if (!v.fits || v.sps != static_cast<int>(sps.size())) continue;
+        auto files = readVersion(v);
+        if (files.isErr() || files.unwrap().size() != sps.size()) continue;
+        std::vector<Entry> theirs;
+        for (auto& f : files.unwrap()) theirs.push_back({std::move(f.file), std::move(f.name)});
+        std::sort(theirs.begin(), theirs.end());
+        if (theirs == own) return v;
+    }
+    return std::nullopt;
+}
+
+Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps) {
+    Aside out;
+    auto& moved = out.moved;
+    if (g_level.dir.empty() || sps.empty()) return out;
     std::error_code ec;
+    if (auto same = sameVersion(sps)) {
+        // Renamed as if made now (as one before "Replace all", whatever it was): the newest, where the
+        // player looks for the SPs that just went. Not renamed, it's a copy of them all the same.
+        auto newest = asideName(g_level.dir, REPLACED);
+        std::filesystem::rename(same->dir, newest, ec);
+        log::info("SPs of {} are in {} already: it's {} now ({})", g_level.key, same->dir, newest, ec ? ec.message() : "ok");
+        out.existing = !ec;
+        for (auto const& sp : sps) {
+            std::filesystem::remove(spPath(sp->id), ec);
+            if (ec) {
+                log::error("Can't delete SP {}: {}", sp->id, ec.message());
+                continue;
+            }
+            moved.push_back(sp);
+        }
+        return out;
+    }
     auto aside = asideName(g_level.dir, REPLACED);
     std::filesystem::create_directories(aside, ec);
     if (ec) {
         log::error("Can't create {}: {}", aside, ec.message());
-        return moved;
+        return out;
     }
     // A folder like the level's: renamed back, it would load as it was. Without its level.json it couldn't
     // be brought back, so then nothing moves.
@@ -863,7 +915,7 @@ std::vector<std::shared_ptr<StartPoint>> setAside(std::vector<std::shared_ptr<St
     if (ec) {
         log::error("Can't copy level.json into {}: {}", aside, ec.message());
         std::filesystem::remove_all(aside, ec);
-        return moved;
+        return out;
     }
     auto names = matjson::Value::object();
     for (auto const& sp : sps) {
@@ -878,11 +930,11 @@ std::vector<std::shared_ptr<StartPoint>> setAside(std::vector<std::shared_ptr<St
     log::info("{} of {} SPs of {} set aside in {}", moved.size(), sps.size(), g_level.key, aside);
     if (moved.empty()) {
         std::filesystem::remove_all(aside, ec);
-        return moved;
+        return out;
     }
     auto res = file::writeStringSafe(aside / "names.json", names.dump());
     if (res.isErr()) log::error("Can't write names into {}: {}", aside, res.unwrapErr());
-    return moved;
+    return out;
 }
 
 std::vector<Version> versions() {
@@ -928,6 +980,25 @@ bool removeVersion(Version const& version) {
     auto removed = std::filesystem::remove_all(version.dir, ec);
     log::info("Version {} deleted: {} files ({})", version.dir, removed, ec ? ec.message() : "ok");
     return !ec;
+}
+
+bool renameVersion(Version const& version, std::string const& name) {
+    std::error_code ec;
+    // Not one gone meanwhile: writing its name would make the folder again.
+    if (!isVersionOfLevel(version.dir) || !std::filesystem::is_directory(version.dir, ec) || name.size() > MAX_NAME_BYTES) {
+        return false;
+    }
+    auto path = version.dir / VERSION_FILE;
+    if (name.empty()) {
+        std::filesystem::remove(path, ec);
+        if (ec) log::error("Can't delete {}: {}", path, ec.message());
+        return !ec;
+    }
+    auto meta = matjson::Value::object();
+    meta["name"] = name;
+    auto res = file::writeStringSafe(path, meta.dump());
+    if (res.isErr()) log::error("Can't write {}: {}", path, res.unwrapErr());
+    return res.isOk();
 }
 
 void removeAll() {

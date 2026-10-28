@@ -19,7 +19,8 @@
                 "size": 90,
                 "charset": "32-126,171,187,1025,1040-1103,1105,8212,8226"
             }
-        }
+        },
+        "sprites": ["resources/sprites/*.png"]
     },
     "settings": {
         "language": {

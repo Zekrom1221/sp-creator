@@ -102,7 +102,9 @@ struct Session {
     unsigned int lastCheckpointRetains = 0;        // its retain count once the attempt started
     bool ownTestMode = false;                      // test mode is on for an attempt from an SP
     // Objects of deleted SPs, out of the level: another mod's switcher may still have one and pick it.
+    // New SPs get them first (addObjectFor).
     std::vector<Ref<StartPosObject>> retired;
+    int objectsMade = 0;                           // through addObject
     StartPosObject* levelStartPos = nullptr;       // the startpos the level itself picked (owned by the level)
     bool levelTestMode = false;
     int nextId = 1;
@@ -309,7 +311,21 @@ void placeObjects() {
 
 // Adds the SP's startpos object to the level, where the player takes control. Going through addObject
 // lets other mods' addObject hooks (startpos switchers) collect it like the level's startposes.
+// Switchers keep what they collected until the level is left, deleted SPs' objects too (MegaHack's list
+// grew by all the SPs ever imported): a deleted SP's object, if there's one, comes back instead, past
+// addObject, and their lists don't grow.
 void addObjectFor(PlayLayer* pl, StartPoint& sp) {
+    auto& retired = g_session.retired;
+    if (!retired.empty()) {
+        Ref<StartPosObject> obj = retired.front();
+        retired.erase(retired.begin());
+        obj->setPosition(objectPosition(sp));
+        pl->m_objects->addObject(obj);
+        pl->addToSection(obj);
+        storage::numberObject(pl, obj);
+        sp.object = obj;
+        return;
+    }
     // Made the way the level's own startposes are (object 31): StartPosObject::create() alone leaves its
     // object ID at 0, which switchers skip.
     auto obj = typeinfo_cast<StartPosObject*>(GameObject::createWithKey(31));
@@ -326,6 +342,7 @@ void addObjectFor(PlayLayer* pl, StartPoint& sp) {
     pl->m_isTestMode = testMode;
     storage::numberObject(pl, obj);
     sp.object = obj;
+    g_session.objectsMade++;
 }
 
 // Takes a deleted SP's object out of the level.
@@ -334,6 +351,7 @@ void retireObject(PlayLayer* pl, StartPoint& sp) {
     pl->removeObjectFromSection(sp.object);
     g_session.retired.push_back(sp.object);
     pl->m_objects->removeObject(sp.object);
+    sp.object = nullptr;  // it may go to another SP
     // The SPs' objects after it moved up a place.
     for (auto const& other : g_session.sps) {
         if (other->object) storage::numberObject(pl, other->object);
@@ -925,6 +943,29 @@ void logRestart(PlayLayer* pl, std::string_view what) {
         sp ? fmt::format(" (its object's {:.3f})", startPosPercent(pl, sp->object->getPositionX())) : "");
 }
 
+// Startpos switchers' "3/5" labels on screen (MegaHack's, at the bottom), and the SPs' objects: the
+// switchers' lists grow by each one made, not by those that came back.
+void logSwitchers(std::string_view when) {
+    std::vector<std::string> labels;
+    std::function<void(CCNode*)> walk = [&](CCNode* node) {
+        if (auto label = typeinfo_cast<CCLabelBMFont*>(node)) {
+            std::string_view s = label->getString() ? label->getString() : "";
+            auto slash = s.find('/');
+            auto digits = [](std::string_view part) {
+                return !part.empty() && std::all_of(part.begin(), part.end(), [](char c) { return c >= '0' && c <= '9'; });
+            };
+            if (slash != std::string_view::npos && digits(s.substr(0, slash)) && digits(s.substr(slash + 1))) {
+                labels.push_back(fmt::format("{}{}", s, label->isVisible() ? "" : " (hidden)"));
+            }
+        }
+        if (!node->getChildren()) return;
+        for (auto child : CCArrayExt<CCNode*>(node->getChildren())) walk(child);
+    };
+    if (auto scene = CCDirector::get()->getRunningScene()) walk(scene);
+    log::info("Smoke test: switchers {}: labels [{}], {} SPs, {} objects made, {} deleted SPs' objects spare", when,
+        fmt::join(labels, ", "), g_session.sps.size(), g_session.objectsMade, g_session.retired.size());
+}
+
 // Other mods' ways in: how Blitzkrieg sees the SPs, another switcher picking an SP and the level start,
 // and a press ending the auto part with control not blocked. Returns false once done.
 bool smokeCompat(PlayLayer* pl) {
@@ -1083,12 +1124,14 @@ void smokeTransfer() {
     auto versions = [] {
         std::vector<std::string> list;
         for (auto const& v : storage::versions()) {
-            list.push_back(fmt::format("{}: {} SPs, {} KB, {}{}", utils::string::pathToString(v.dir.filename()), v.sps,
-                v.bytes / 1024, v.replaced ? "replaced" : "old", v.fits ? "" : ", doesn't fit"));
+            list.push_back(fmt::format("{}{}: {} SPs, {} KB, {}{}", utils::string::pathToString(v.dir.filename()),
+                v.name.empty() ? "" : fmt::format(" \"{}\"", v.name), v.sps, v.bytes / 1024, v.replaced ? "replaced" : "old",
+                v.fits ? "" : ", doesn't fit"));
         }
         return fmt::format("{} [{}]", list.size(), fmt::join(list, "; "));
     };
     auto all = [](transfer::Pack const& p) { return std::vector<bool>(p.items.size(), true); };
+    logSwitchers("before replacing");
     // The file in place of the level's SPs, the same ones: they go to a version, and come in again.
     auto result = transfer::take(*pack, all(*pack), core::Replace::SaveVersion);
     log::info("Smoke test: replaced by the import, saving a version: {} added, {} failed, {} not gone, SPs now {}, versions {}",
@@ -1120,10 +1163,42 @@ void smokeTransfer() {
         ByteVector junk(4096, 0x41);
         if (file.isOk()) {
             auto partly = core::import({{file.unwrap(), ""}, {junk, ""}}, core::Replace::Delete);
-            log::info("Smoke test: deleting with one of two failing: {} added, {} failed, saved {}, SPs now {}, versions {}",
-                partly.added, partly.failed, partly.saved, ids(), versions());
+            log::info("Smoke test: deleting with one of two failing (the same SPs as the version): {} added, {} failed, saved {}, "
+                "in a version already {}, SPs now {}, versions {}", partly.added, partly.failed, partly.saved, partly.existing,
+                ids(), versions());
         }
     }
+    // Saving SPs a version has already makes no copy: that one goes up, its name kept. Not when a name of
+    // theirs differs, or that version's copy is damaged.
+    auto saveAgain = [&](std::string_view what) {
+        auto again = transfer::take(*pack, all(*pack), core::Replace::SaveVersion);
+        log::info("Smoke test: {}: {} added, saved {}, in a version already {}, SPs now {}, versions {}", what, again.added,
+            again.saved, again.existing, ids(), versions());
+    };
+    if (auto named = storage::versions(); !named.empty()) {
+        log::info("Smoke test: version renamed: {}, versions {}", storage::renameVersion(named.front(), "Smoke версия"), versions());
+    }
+    saveAgain("the file in place of 1 SP");
+    if (!g_session.sps.empty()) core::rename(g_session.sps.front(), "Named");
+    saveAgain("the file in place of the same SPs, one named");
+    saveAgain("the file in place of the same SPs");
+    if (auto newest = storage::versions(); !newest.empty()) {
+        std::error_code ec3;
+        for (auto it = std::filesystem::directory_iterator(newest.front().dir, ec3); !ec3 && it != std::filesystem::directory_iterator();
+             it.increment(ec3)) {
+            if (it->path().extension() != ".spc") continue;
+            auto bytes = file::readBinary(it->path());
+            if (bytes.isOk() && !bytes.unwrap().empty()) {
+                bytes.unwrap()[bytes.unwrap().size() / 2] ^= 0x5a;
+                (void)file::writeBinary(it->path(), bytes.unwrap());
+                log::info("Smoke test: damaged {} of {}", it->path().filename(), newest.front().dir.filename());
+            }
+            break;
+        }
+    }
+    saveAgain("the file in place of the same SPs, the version's copy damaged");
+    list = storage::versions();
+    if (list.empty()) return log::error("Smoke test: no version");
     // One made for another version of the level: listed, refused, deleted like the others.
     std::error_code ec2;
     auto old = list.front().dir.parent_path() / (level->key + "-old-1000000000");
@@ -1153,6 +1228,7 @@ void smokeTransfer() {
     for (auto const& v : storage::versions()) removed += storage::removeVersion(v);
     log::info("Smoke test: deleted {} versions, versions now {}, folders there {} {}", removed, versions(),
         std::filesystem::exists(list.front().dir, ec2), std::filesystem::exists(old, ec2));
+    logSwitchers("after replacing");
 }
 
 // At the level start: SPs from a file, as on another computer.
@@ -1294,6 +1370,7 @@ void smokeUI(int stage) {
             return next();
         case 3:
             captureScreen("smoke-pause.png");
+            logSwitchers("in the pause menu");
             if (auto btn = pause ? pause->getChildByIDRecursive("sp-list-button"_spr) : nullptr) {
                 auto at = btn->getParent()->convertToWorldSpace(btn->getPosition());
                 auto size = CCDirector::get()->getWinSize();
@@ -1324,6 +1401,7 @@ void smokeUI(int stage) {
         }
         case 6:
             captureScreen("smoke-rename.png");
+            pressButton("save-name-button"_spr);
             splist::openExport();
             return next();
         case 7: {
@@ -1350,22 +1428,37 @@ void smokeUI(int stage) {
             return next();
         case 11:
             captureScreen("smoke-versions.png");
+            pressButton(fmt::format("{}/rename-version-0", Mod::get()->getID()));
+            return next();
+        case 12: {
+            auto input = findFirstChildRecursive<TextInput>(CCScene::get(), [](auto) { return true; });
+            if (input) input->setString("Перед концовкой (ship)");
+            else log::warn("Smoke test: no name field");
+            captureScreen("smoke-rename-version.png");
+            pressButton("save-name-button"_spr);
+            return next();
+        }
+        case 13: {
+            auto list = storage::versions();
+            log::info("Smoke test: version renamed in the list: \"{}\"", list.empty() ? std::string("none") : list.front().name);
+            captureScreen("smoke-versions-named.png");
             pressButton(fmt::format("{}/open-version-0", Mod::get()->getID()));
             return next();
-        case 12:
+        }
+        case 14:
             captureScreen("smoke-version.png");
             logTouchPriorities("with a version open");
             // The popups below rebuild their lists meanwhile.
             pressButton("add-button"_spr);
             return next();
-        case 13: {
+        case 15: {
             logTouchPriorities("after adding from the version");
             // A delete confirmation that runs out under the next popup rebuilds the list below it.
             pressButton(fmt::format("{}/delete-version-0", Mod::get()->getID()));
             pressButton(fmt::format("{}/open-version-0", Mod::get()->getID()));
             return next(3.2f);
         }
-        case 14: {
+        case 16: {
             logTouchPriorities("after a delete confirmation ran out below");
             // Back to the SP list (the first popup): it rebuilds once on top.
             std::vector<FLAlertLayer*> above;
@@ -1375,11 +1468,13 @@ void smokeUI(int stage) {
             for (size_t i = above.size(); i-- > 1;) above[i]->keyBackClicked();
             return next();
         }
-        case 15: {
+        case 17: {
             logTouchPriorities("back at the SP list");
             auto popup = CCScene::get()->getChildByType<FLAlertLayer>(0);
             auto list = popup ? findFirstChildRecursive<ScrollLayer>(popup, [](auto) { return true; }) : nullptr;
             log::info("Smoke test: SP list rows: {} for {} SPs", list ? list->m_contentLayer->getChildrenCount() : 0, sps.size());
+            captureScreen("smoke-list-end.png");
+            logSwitchers("at the end");
             return finishSmokeTest();
         }
         // The file dialogs through the buttons, as a player goes: export the SPs, then import that file (all
@@ -1501,6 +1596,20 @@ void nextSmokePhase() {
         pl->resetLevel();
         log::info("Smoke test: back at the level start, player at x {:.1f}, startpos {}, test mode {}",
             pl->m_player1->m_position.x, pl->m_startPosObject ? "set" : "none", pl->m_isTestMode);
+        logSwitchers("back at the level start");
+        // MegaHack's switcher through its own key (E: next): its label shows how many startposes it has.
+        if (Loader::get()->getLoadedMod("absolllute.megahack")) {
+            t.stepsLeft = 600;
+            for (int i = 1; i <= 2; i++) {
+                CCScene::get()->runAction(CCSequence::create(CCDelayTime::create(0.5f * i), CallFuncExt::create([i] {
+                    pressKey(KEY_E);
+                    CCScene::get()->runAction(CCSequence::create(CCDelayTime::create(0.2f), CallFuncExt::create([i] {
+                        if (auto pl = PlayLayer::get()) logRestart(pl, fmt::format("MegaHack's next, {}", i));
+                        logSwitchers(fmt::format("after MegaHack's next, {}", i));
+                    }), nullptr));
+                }), nullptr));
+            }
+        }
         return;
     }
     if (t.ui && !t.uiDone) {
@@ -1641,8 +1750,10 @@ ImportResult import(std::vector<Incoming> const& files, Replace replace) {
         auto own = s.sps;
         std::vector<SP> gone;
         if (replace == Replace::SaveVersion) {
-            gone = storage::setAside(own);
+            auto aside = storage::setAside(own);
+            gone = std::move(aside.moved);
             out.saved = !gone.empty();
+            out.existing = out.saved && aside.existing;
         }
         else {
             for (auto const& sp : own) {

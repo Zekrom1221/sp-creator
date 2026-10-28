@@ -76,9 +76,14 @@ namespace storage {
     // SP files (passed through readHeader) loaded and saved under ids from `nextId` on: an SP per file,
     // null where it didn't work (in the log). Reads the checkpoints, which PersistenceAPI doesn't check.
     std::vector<std::shared_ptr<StartPoint>> add(std::vector<geode::ByteSpan> const& files, int& nextId);
+    struct Aside {
+        std::vector<std::shared_ptr<StartPoint>> moved;  // out of the level's folder: in a version now
+        bool existing = false;  // a version had them already, and is the newest now
+    };
     // Moves the files of SPs of the level into a folder of their own (with their names), a version of
-    // them, out of the way of imported ones: those it moved.
-    std::vector<std::shared_ptr<StartPoint>> setAside(std::vector<std::shared_ptr<StartPoint>> const& sps);
+    // them, out of the way of imported ones. If a version that fits holds just these SPs already, byte for
+    // byte and with the same names, their files are deleted instead, and that version becomes the newest.
+    Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps);
 
     // SPs set aside in a folder next to the level's: by "Replace all" (setAside), or by load() for another
     // version of the level. Kept until the player deletes them.
@@ -89,6 +94,7 @@ namespace storage {
         int sps = 0;
         uintmax_t bytes = 0;    // all its files
         bool fits = false;      // made for the open level's version: can be brought back
+        std::string name;       // given by the player; empty: none
     };
     // The open level's versions that hold SPs, newest first.
     std::vector<Version> versions();
@@ -99,4 +105,6 @@ namespace storage {
     // A version's SP files (to pass through readHeader), with their names. Only of a version that fits.
     geode::Result<std::vector<VersionSP>> readVersion(Version const& version);
     bool removeVersion(Version const& version);
+    // An empty name takes the version's name away.
+    bool renameVersion(Version const& version, std::string const& name);
 }

@@ -50,6 +50,7 @@ namespace text {
         ExportFailed,
         Imported,         // {count}
         ImportedSaved,    // {count}
+        ImportedInVersion, // {count}
         ImportFailed,     // {count}
         ImportFailedSaved, // {count}
         NotSetAside,      // {imported} {not set aside}
@@ -84,6 +85,8 @@ namespace text {
         VersionDeleted,
         VersionNotDeleted,
         VersionUnreadable,
+        RenameVersion,
+        VersionNotRenamed,
         Kilobytes,        // {size}
         Megabytes,        // {size}
         Count,

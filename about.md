@@ -21,12 +21,14 @@ them. SPs only fit the level version, game version and Low Detail Mode they were
 from people you trust.
 
 <cy>Versions</c> in the SP list holds the SPs saved that way, and those set aside when the level was updated.
-Open one to bring its SPs back, or delete the ones you don't need: nothing is deleted on its own.
+Open one to bring its SPs back, rename it, or delete the ones you don't need: nothing is deleted on its own.
+SPs that a version holds already aren't saved twice: that version moves to the top instead.
 
 ## With other mods
 
 - **Startpos switchers** (Startpos Switcher, Mega Hack) list your SPs with the level's startposes. An SP placed in
-  the current visit goes to the end of their list until you enter the level again.
+  the current visit goes to the end of their list until you enter the level again. After deleting or replacing
+  SPs, their list may keep a few extra places until then: those take you to the level start.
 - **Mega Hack**: on rated levels its switcher is off unless you turn on <cy>Allow Rated</c> in the StartPos
   Switcher options.
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with

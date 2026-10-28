@@ -56,6 +56,7 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"Couldn't write the file", "Не получилось записать файл"},
     {"SPs imported: {}", "Импортировано SP: {}"},
     {"SPs imported: {}. Yours are in Versions", "Импортировано SP: {}. Твои — в «Версиях»"},
+    {"SPs imported: {}. Yours were in Versions already: moved up", "Импортировано SP: {}. Твои уже были в «Версиях»: подняты наверх"},
     {"SPs that couldn't be imported: {}", "Не импортировалось SP: {}"},
     {"SPs that couldn't be imported: {}. Yours are in Versions", "Не импортировалось SP: {}. Твои — в «Версиях»"},
     {"SPs imported: {}, but {} of yours couldn't go to Versions", "Импортировано SP: {}, но {} твоих не ушли в «Версии»"},
@@ -89,6 +90,8 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"Version deleted", "Версия удалена"},
     {"Couldn't delete the version", "Не получилось удалить версию"},
     {"This version can't be read", "Эту версию не получилось прочитать"},
+    {"Rename version", "Переименовать версию"},
+    {"Couldn't rename the version", "Не получилось переименовать версию"},
     {"{} KB", "{} КБ"},
     {"{:.1f} MB", "{:.1f} МБ"},
 }};

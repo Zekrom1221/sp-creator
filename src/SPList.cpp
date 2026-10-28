@@ -34,6 +34,16 @@ CCMenuItemSpriteExtra* textButton(std::string const& caption, geode::Function<vo
     return CCMenuItemExt::createSpriteExtra(spr, std::move(callback));
 }
 
+// The game has no pencil (its edit button is the editor's): the mod's, on a round button as big as the
+// play one at 0.32.
+CCMenuItemSpriteExtra* renameButton(geode::Function<void(CCMenuItemSpriteExtra*)> callback) {
+    auto spr = CircleButtonSprite::createWithSprite("pencil.png"_spr, 1.f, CircleBaseColor::Green, CircleBaseSize::Medium);
+    auto play = CCSprite::createWithSpriteFrameName("GJ_playBtn2_001.png");
+    if (!spr || !play) return CCMenuItemExt::createSpriteExtraWithFrameName("GJ_editBtn_001.png", 0.32f, std::move(callback));
+    spr->setScale(play->getContentHeight() * 0.32f / spr->getContentHeight());
+    return CCMenuItemExt::createSpriteExtra(spr, std::move(callback));
+}
+
 // The game gives menus made while popups are open the touch priority of the top one. A list rebuilt under
 // another popup would get buttons that take that popup's clicks, so lists below it wait (see refresh()).
 bool onTop(CCLayer* popup) {
@@ -315,9 +325,11 @@ protected:
             core::notify(NotificationIcon::Warning, text::format(msg, result.failed));
         }
         else if (result.notMoved > 0) {
-            auto msg = replace == core::Replace::SaveVersion ? Msg::NotSetAside : Msg::NotDeleted;
+            // In a version already, the ones left only couldn't be deleted.
+            auto msg = replace == core::Replace::SaveVersion && !result.existing ? Msg::NotSetAside : Msg::NotDeleted;
             core::notify(NotificationIcon::Warning, text::format(msg, result.added, result.notMoved));
         }
+        else if (result.existing) core::notify(NotificationIcon::Success, text::format(Msg::ImportedInVersion, result.added));
         else if (result.saved) core::notify(NotificationIcon::Success, text::format(Msg::ImportedSaved, result.added));
         else core::notify(NotificationIcon::Success, text::format(Msg::Imported, result.added));
         if (m_done) m_done();
@@ -339,6 +351,60 @@ public:
     // From a file: someone else's SPs.
     static ImportPopup* fromFile(transfer::Pack pack, geode::Function<void()> done) {
         return create(std::move(pack), str(Msg::ImportTitle), str(Msg::ImportWarning), WARNING_COLOR, std::move(done));
+    }
+};
+
+// A name for an SP or a version: `save` gets it, trimmed (empty: no name).
+class RenamePopup : public Popup {
+protected:
+    TextInput* m_input = nullptr;
+    geode::Function<void(std::string)> m_save;
+
+    bool init(std::string const& title, std::string const& name, geode::Function<void(std::string)> save) {
+        if (!Popup::init(260.f, 130.f)) return false;
+        m_save = std::move(save);
+        setGoldTitle(this, title);
+
+        m_input = TextInput::create(200.f, str(Msg::NamePlaceholder), text::font());
+        // The game's own filters are ASCII only; the mod's font has Cyrillic letters too.
+        m_input->setFilter(std::string(getCommonFilterAllowedChars(CommonFilter::Any)) +
+            "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ");
+        m_input->setMaxCharCount(MAX_NAME_CHARS);
+        m_input->setString(name);
+        m_mainLayer->addChildAtPosition(m_input, Anchor::Center, {0.f, 3.f});
+
+        auto saveBtn = textButton(str(Msg::Save), [this](auto) { this->onSave(); });
+        saveBtn->setID("save-name-button"_spr);
+        m_buttonMenu->addChildAtPosition(saveBtn, Anchor::Bottom, {0.f, 24.f});
+        return true;
+    }
+
+    void onSave() {
+        auto name = std::string(m_input->getString());
+        if (m_save) m_save(utils::string::trim(name));
+        this->onClose(nullptr);
+    }
+
+public:
+    CCLabelBMFont* titleLabel() { return m_title; }
+    using Popup::setTitle;
+
+    static RenamePopup* create(std::string const& title, std::string const& name, geode::Function<void(std::string)> save) {
+        auto ret = new RenamePopup();
+        if (ret->init(title, name, std::move(save))) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+
+    static RenamePopup* forSP(core::SP sp, geode::Function<void()> done) {
+        auto name = sp->name;
+        return create(str(Msg::RenameTitle), name, [sp = std::move(sp), done = std::move(done)](std::string name) mutable {
+            core::rename(sp, std::move(name));
+            if (done) done();
+        });
     }
 };
 
@@ -398,12 +464,16 @@ protected:
         auto node = CCNode::create();
         node->setContentSize({LIST_WIDTH, ROW_HEIGHT});
         bool confirming = m_confirming == v.dir;
-        auto label = text::label(confirming ? str(Msg::ConfirmDelete) : fmt::format("{}, {}", text::date(v.time), reason(v)));
+        // A named one has its date under the name, without the reason (nearly always "Replace all").
+        bool named = !v.name.empty();
+        auto title = named ? v.name : fmt::format("{}, {}", text::date(v.time), reason(v));
+        auto label = text::label(confirming ? str(Msg::ConfirmDelete) : title);
         label->setAnchorPoint({0.f, 0.5f});
         label->limitLabelWidth(LIST_WIDTH - 120.f, 0.42f, 0.1f);
         if (confirming) label->setColor(CONFIRM_COLOR);
         node->addChildAtPosition(label, Anchor::Left, {10.f, 6.f}, false);
-        auto note = text::label(v.fits ? info(v) : fmt::format("{}, {}", info(v), str(Msg::VersionDeleteOnly)));
+        auto under = named ? fmt::format("{}, {}", text::date(v.time), info(v)) : info(v);
+        auto note = text::label(v.fits ? under : fmt::format("{}, {}", under, str(Msg::VersionDeleteOnly)));
         note->setAnchorPoint({0.f, 0.5f});
         note->limitLabelWidth(LIST_WIDTH - 120.f, 0.32f, 0.1f);
         note->setColor(v.fits ? NOTE_COLOR : NEAR_COLOR);
@@ -419,6 +489,9 @@ protected:
             open->setID(fmt::format("{}/open-version-{}", Mod::get()->getID(), i));
             menu->addChild(open);
         }
+        auto rename = renameButton([this, v](auto) { this->onRename(v); });
+        rename->setID(fmt::format("{}/rename-version-{}", Mod::get()->getID(), i));
+        menu->addChild(rename);
         auto remove = CCMenuItemExt::createSpriteExtraWithFrameName("GJ_trashBtn_001.png", 0.55f, [this, v](auto) {
             this->onDelete(v);
         });
@@ -460,12 +533,26 @@ protected:
         if (pack.isErr()) return core::notify(NotificationIcon::Warning, pack.unwrapErr());
         if (pack.unwrap().sameAsLevel) return core::notify(NotificationIcon::Info, str(Msg::VersionHere));
         Ref<VersionsPopup> self = this;
-        auto popup = ImportPopup::create(std::move(pack).unwrap(), text::format(Msg::VersionTitle, text::date(v.time)),
-            fmt::format("{}, {}", reason(v), info(v)), NOTE_COLOR, [self] {
+        bool named = !v.name.empty();
+        auto title = named ? v.name : text::format(Msg::VersionTitle, text::date(v.time));
+        auto message = named ? fmt::format("{}, {}, {}", text::date(v.time), reason(v), info(v)) : fmt::format("{}, {}", reason(v), info(v));
+        auto popup = ImportPopup::create(std::move(pack).unwrap(), title, message, NOTE_COLOR, [self] {
                 // Replacing may have made a version.
                 self->refresh();
                 if (self->m_changed) self->m_changed();
             });
+        if (popup) popup->show();
+    }
+
+    void onRename(storage::Version const& v) {
+        this->stopActionByTag(1);
+        m_confirming.clear();
+        this->refresh();
+        Ref<VersionsPopup> self = this;
+        auto popup = RenamePopup::create(str(Msg::RenameVersion), v.name, [self, v](std::string name) {
+            if (!storage::renameVersion(v, name)) core::notify(NotificationIcon::Warning, str(Msg::VersionNotRenamed));
+            self->refresh();
+        });
         if (popup) popup->show();
     }
 
@@ -502,53 +589,6 @@ public:
     }
 };
 
-class RenamePopup : public Popup {
-protected:
-    core::SP m_sp;
-    TextInput* m_input = nullptr;
-    geode::Function<void()> m_done;
-
-    bool init(core::SP sp, geode::Function<void()> done) {
-        if (!Popup::init(260.f, 130.f)) return false;
-        m_sp = std::move(sp);
-        m_done = std::move(done);
-        setGoldTitle(this, str(Msg::RenameTitle));
-
-        m_input = TextInput::create(200.f, str(Msg::NamePlaceholder), text::font());
-        // The game's own filters are ASCII only; the mod's font has Cyrillic letters too.
-        m_input->setFilter(std::string(getCommonFilterAllowedChars(CommonFilter::Any)) +
-            "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ");
-        m_input->setMaxCharCount(MAX_NAME_CHARS);
-        m_input->setString(m_sp->name);
-        m_mainLayer->addChildAtPosition(m_input, Anchor::Center, {0.f, 3.f});
-
-        auto save = textButton(str(Msg::Save), [this](auto) { this->onSave(); });
-        m_buttonMenu->addChildAtPosition(save, Anchor::Bottom, {0.f, 24.f});
-        return true;
-    }
-
-    void onSave() {
-        auto name = std::string(m_input->getString());
-        core::rename(m_sp, utils::string::trim(name));
-        if (m_done) m_done();
-        this->onClose(nullptr);
-    }
-
-public:
-    CCLabelBMFont* titleLabel() { return m_title; }
-    using Popup::setTitle;
-
-    static RenamePopup* create(core::SP sp, geode::Function<void()> done) {
-        auto ret = new RenamePopup();
-        if (ret->init(std::move(sp), std::move(done))) {
-            ret->autorelease();
-            return ret;
-        }
-        delete ret;
-        return nullptr;
-    }
-};
-
 class SPListPopup : public Popup {
 protected:
     static constexpr float WIDTH = 380.f, HEIGHT = 290.f;
@@ -559,11 +599,13 @@ protected:
     core::SP m_confirming;  // delete pressed once on this SP
     bool m_stale = false;   // to rebuild once on top
 
+public:
     void refresh() {
         m_stale = true;
         this->rebuildIfOnTop(0.f);
     }
 
+protected:
     void rebuildIfOnTop(float) {
         if (!m_stale || !onTop(this)) return;
         m_stale = false;
@@ -658,9 +700,7 @@ protected:
         });
         menu->addChild(play);
         if (sp) {
-            auto rename = CCMenuItemExt::createSpriteExtraWithFrameName("GJ_editBtn_001.png", 0.32f, [this, sp](auto) {
-                this->onRename(sp);
-            });
+            auto rename = renameButton([this, sp](auto) { this->onRename(sp); });
             auto remove = CCMenuItemExt::createSpriteExtraWithFrameName("GJ_trashBtn_001.png", 0.55f, [this, sp](auto) {
                 this->onDelete(sp);
             });
@@ -704,8 +744,11 @@ protected:
     }
 
     void onRename(core::SP const& sp) {
+        this->stopActionByTag(1);
         m_confirming = nullptr;
-        if (auto popup = RenamePopup::create(sp, [this] { this->refresh(); })) popup->show();
+        this->refresh();
+        Ref<SPListPopup> self = this;
+        if (auto popup = RenamePopup::forSP(sp, [self] { self->refresh(); })) popup->show();
     }
 
     void onDelete(core::SP const& sp) {
@@ -748,7 +791,7 @@ void open(PauseLayer* pause) {
 }
 
 void openRename(core::SP const& sp) {
-    if (auto popup = RenamePopup::create(sp, {})) popup->show();
+    if (auto popup = RenamePopup::forSP(sp, {})) popup->show();
 }
 
 void openExport() {
@@ -756,7 +799,9 @@ void openExport() {
 }
 
 void openImport(transfer::Pack pack) {
-    if (auto popup = ImportPopup::fromFile(std::move(pack), {})) popup->show();
+    // The SP list below, if it's open, shows what came in, as when the file came through its button.
+    Ref<SPListPopup> list = CCScene::get()->getChildByType<SPListPopup>(0);
+    if (auto popup = ImportPopup::fromFile(std::move(pack), [list] { if (list) list->refresh(); })) popup->show();
 }
 
 }
