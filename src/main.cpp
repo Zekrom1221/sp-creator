@@ -758,6 +758,7 @@ struct SmokeTest {
     std::string exportTo;
     bool exported = false;
     std::string importFrom;
+    bool checkSaved = false;  // at the level start: what an earlier run saved (SPs, versions, names)
     // UI: the file dialogs through the buttons instead of renaming and the lists (tools/answer_dialogs.ps1).
     bool dialogs = false;
     unsigned int waitFrom = 0;
@@ -910,6 +911,7 @@ void startSmokeTest() {
     }
     g_smoke.exportTo = root["export_to"].asString().unwrapOr("");
     g_smoke.importFrom = root["import_from"].asString().unwrapOr("");
+    g_smoke.checkSaved = root["check_saved"].asBool().unwrapOr(false);
     g_smoke.dialogs = root["dialogs"].asBool().unwrapOr(false);
     if (g_smoke.placeAtX.empty()) g_smoke.stepsLeft = 60;
     log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}", id,
@@ -1229,6 +1231,36 @@ void smokeTransfer() {
     log::info("Smoke test: deleted {} versions, versions now {}, folders there {} {}", removed, versions(),
         std::filesystem::exists(list.front().dir, ec2), std::filesystem::exists(old, ec2));
     logSwitchers("after replacing");
+}
+
+// At the level start, after a run that saved SPs and versions: what came back, and a version that holds the
+// level's SPs again is found as such (it's all on disk: nothing of the last visit is left in memory).
+void smokeCheckSaved() {
+    auto describe = [] {
+        std::vector<std::string> sps, list;
+        for (auto const& sp : g_session.sps) sps.push_back(fmt::format("{} \"{}\" {:.1f}%", sp->id, sp->name, sp->percent));
+        for (auto const& v : storage::versions()) {
+            std::vector<std::string> names;
+            if (auto files = storage::readVersion(v); files.isOk()) {
+                for (auto const& f : files.unwrap()) names.push_back(fmt::format("\"{}\"", f.name));
+            }
+            list.push_back(fmt::format("{} \"{}\": {} SPs [{}]{}", utils::string::pathToString(v.dir.filename()), v.name, v.sps,
+                fmt::join(names, ", "), v.fits ? "" : ", doesn't fit"));
+        }
+        return fmt::format("SPs [{}], versions {} [{}]", fmt::join(sps, ", "), list.size(), fmt::join(list, "; "));
+    };
+    log::info("Smoke test: saved before: {}", describe());
+    auto list = storage::versions();
+    if (list.empty()) return log::error("Smoke test: no version saved before");
+    auto all = [](transfer::Pack const& p) { return std::vector<bool>(p.items.size(), true); };
+    auto version = transfer::openVersion(list.front());
+    if (version.isErr()) return log::error("Smoke test: the version refused: {}", version.unwrapErr());
+    auto put = transfer::take(version.unwrap(), all(version.unwrap()), core::Replace::Delete);
+    log::info("Smoke test: the version in place of the SPs: {} added, {}", put.added, describe());
+    auto again = transfer::openVersion(storage::versions().front());
+    if (again.isErr()) return log::error("Smoke test: the version refused: {}", again.unwrapErr());
+    auto saved = transfer::take(again.unwrap(), all(again.unwrap()), core::Replace::SaveVersion);
+    log::info("Smoke test: saving them again: saved {}, in a version already {}, {}", saved.saved, saved.existing, describe());
 }
 
 // At the level start: SPs from a file, as on another computer.
@@ -1897,6 +1929,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         for (auto const& sp : g_session.sps) addObjectFor(this, *sp);
         notifyLoaded(loaded, g_session.sps.size());
         if (g_smoke.active && !g_smoke.importFrom.empty()) smokeImport();
+        if (g_smoke.active && g_smoke.checkSaved) smokeCheckSaved();
     }
 
     void resetLevel() {

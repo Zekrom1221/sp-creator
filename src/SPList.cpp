@@ -35,9 +35,10 @@ CCMenuItemSpriteExtra* textButton(std::string const& caption, geode::Function<vo
 }
 
 // The game has no pencil (its edit button is the editor's): the mod's, on a round button as big as the
-// play one at 0.32.
+// play one at 0.32. Lying diagonally it fills its box to the corners: at 0.75 of the size the button gives
+// it, its tip stays off the button's rim.
 CCMenuItemSpriteExtra* renameButton(geode::Function<void(CCMenuItemSpriteExtra*)> callback) {
-    auto spr = CircleButtonSprite::createWithSprite("pencil.png"_spr, 1.f, CircleBaseColor::Green, CircleBaseSize::Medium);
+    auto spr = CircleButtonSprite::createWithSprite("pencil.png"_spr, 0.75f, CircleBaseColor::Green, CircleBaseSize::Medium);
     auto play = CCSprite::createWithSpriteFrameName("GJ_playBtn2_001.png");
     if (!spr || !play) return CCMenuItemExt::createSpriteExtraWithFrameName("GJ_editBtn_001.png", 0.32f, std::move(callback));
     spr->setScale(play->getContentHeight() * 0.32f / spr->getContentHeight());
