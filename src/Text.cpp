@@ -45,17 +45,21 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"Export SPs", "Экспорт SP"},
     {"Import SPs", "Импорт SP"},
     {"Import files only from people you trust", "Импортируй файлы только от тех, кому доверяешь"},
-    {"Click again: your {} SPs here go aside, not deleted", "Нажми ещё раз: твои SP ({}) уйдут в сторону, не удалятся"},
     {"Add", "Добавить"},
     {"Replace all", "Заменить все"},
     {"already here", "уже есть"},
+    {"twice in the file", "повтор в файле"},
     {"near your SP {} ({:.1f}%)", "рядом с твоим SP {} ({:.1f}%)"},
     {"Nothing selected", "Ничего не выбрано"},
+    {"The picked SPs are already here", "Выбранные SP уже есть"},
     {"SPs exported: {}", "Экспортировано SP: {}"},
     {"Couldn't write the file", "Не получилось записать файл"},
     {"SPs imported: {}", "Импортировано SP: {}"},
+    {"SPs imported: {}. Yours are in Versions", "Импортировано SP: {}. Твои — в «Версиях»"},
     {"SPs that couldn't be imported: {}", "Не импортировалось SP: {}"},
-    {"SPs imported: {}, but {} of yours couldn't be set aside", "Импортировано SP: {}, но {} твоих не удалось убрать в сторону"},
+    {"SPs that couldn't be imported: {}. Yours are in Versions", "Не импортировалось SP: {}. Твои — в «Версиях»"},
+    {"SPs imported: {}, but {} of yours couldn't go to Versions", "Импортировано SP: {}, но {} твоих не ушли в «Версии»"},
+    {"SPs imported: {}, but {} of yours couldn't be deleted", "Импортировано SP: {}, но {} твоих не удалились"},
     {"All SPs from the file are already here", "Все SP из файла уже есть"},
     {"Not an SP Creator file", "Это не файл SP Creator"},
     {"Made by a newer SP Creator: update the mod", "Файл из новой версии SP Creator: обнови мод"},
@@ -67,6 +71,26 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"These SPs are for Low Detail Mode: turn it on", "Эти SP для Low Detail Mode: включи его"},
     {"These SPs are for Low Detail Mode off: turn it off", "Эти SP без Low Detail Mode: выключи его"},
     {"SP Creator SPs", "SP из SP Creator"},
+    {"Your SPs here ({}) will be replaced. Save them?", "Твои SP здесь ({}) будут заменены. Сохранить их?"},
+    {"Saved ones can be brought back: SP list, Versions", "Сохранённые можно вернуть: список SP, «Версии»"},
+    {"Save and replace", "Сохранить и заменить"},
+    {"Delete and replace", "Удалить и заменить"},
+    {"Versions", "Версии"},
+    {"SP versions", "Версии SP"},
+    {"Versions: {}, {} in all", "Версий: {}, всего {}"},
+    {"No versions yet. Replace all can save your SPs as one.", "Версий пока нет. «Заменить все» может сохранить твои SP версией."},
+    {"before Replace all", "до «Заменить все»"},
+    {"before a level update", "до обновления уровня"},
+    {"SPs: {}, {}", "SP: {}, {}"},
+    {"for another level version: delete only", "для другой версии уровня: только удалить"},
+    {"Open", "Открыть"},
+    {"SPs of {}", "SP от {}"},
+    {"The level has these SPs already", "Эти SP уже стоят в уровне"},
+    {"Version deleted", "Версия удалена"},
+    {"Couldn't delete the version", "Не получилось удалить версию"},
+    {"This version can't be read", "Эту версию не получилось прочитать"},
+    {"{} KB", "{} КБ"},
+    {"{:.1f} MB", "{:.1f} МБ"},
 }};
 // Entries left out would be null.
 static_assert(std::ranges::all_of(TEXTS, [](Entry const& e) { return e.en && e.ru; }), "a text is missing");
@@ -95,6 +119,20 @@ bool russian() {
 std::string_view tr(Msg msg) {
     auto const& e = TEXTS[static_cast<size_t>(msg)];
     return russian() ? e.ru : e.en;
+}
+
+std::string size(uintmax_t bytes) {
+    constexpr uintmax_t MB = 1024 * 1024;
+    if (bytes < MB) return format(Msg::Kilobytes, (bytes + 1023) / 1024);
+    return format(Msg::Megabytes, static_cast<double>(bytes) / MB);
+}
+
+std::string date(std::time_t time) {
+    std::tm tm{};
+    if (time <= 0 || localtime_s(&tm, &time) != 0) return "?";
+    char out[32];
+    std::strftime(out, sizeof(out), russian() ? "%d.%m.%Y %H:%M" : "%Y-%m-%d %H:%M", &tm);
+    return out;
 }
 
 char const* font() {

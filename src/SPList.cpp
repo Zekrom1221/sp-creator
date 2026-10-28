@@ -12,21 +12,41 @@ using namespace geode::prelude;
 using text::Msg;
 
 // The SP list in the pause menu: play from an SP (or the level start), rename or delete one; export SPs
-// to a file, import them from one.
+// to a file, import them from one; bring back or delete versions of the level's SPs.
 
 namespace {
 
 // The text field may count bytes, and a Cyrillic letter is two.
 constexpr size_t MAX_NAME_CHARS = 48;
 constexpr float DELETE_CONFIRM_SECONDS = 2.5f;
+constexpr ccColor3B WARNING_COLOR = {255, 200, 80}, NOTE_COLOR = {190, 190, 190}, NEAR_COLOR = {255, 170, 60},
+    CONFIRM_COLOR = {255, 90, 90};
 
 std::string str(Msg msg) {
     return std::string(text::tr(msg));
 }
 
-CCMenuItemSpriteExtra* textButton(std::string const& caption, geode::Function<void(CCMenuItemSpriteExtra*)> callback) {
-    auto spr = ButtonSprite::create(caption.c_str(), 0, 0, 0.7f, false, text::fontFor(caption, true), "GJ_button_01.png", 30.f);
+// `size` scales all of it.
+CCMenuItemSpriteExtra* textButton(std::string const& caption, geode::Function<void(CCMenuItemSpriteExtra*)> callback,
+    float size = 1.f, char const* texture = "GJ_button_01.png") {
+    auto spr = ButtonSprite::create(caption.c_str(), 0, 0, 0.7f, false, text::fontFor(caption, true), texture, 30.f);
+    spr->setScale(size);
     return CCMenuItemExt::createSpriteExtra(spr, std::move(callback));
+}
+
+// The game gives menus made while popups are open the touch priority of the top one. A list rebuilt under
+// another popup would get buttons that take that popup's clicks, so lists below it wait (see refresh()).
+bool onTop(CCLayer* popup) {
+    auto handler = CCTouchDispatcher::get()->findHandler(popup);
+    return handler && handler->getPriority() == CCTouchDispatcher::get()->getTargetPrio();
+}
+
+// A click on a delete button asks for another one, for a while: `expired` then.
+void confirmFor(CCNode* popup, geode::Function<void()> expired) {
+    popup->stopActionByTag(1);
+    auto expire = CCSequence::create(CCDelayTime::create(DELETE_CONFIRM_SECONDS), CallFuncExt::create(std::move(expired)), nullptr);
+    expire->setTag(1);
+    popup->runAction(expire);
 }
 
 // goldFont has no Cyrillic letters: the mod's font, coloured like it.
@@ -58,12 +78,12 @@ protected:
     std::vector<bool> m_picked;
     CCLabelBMFont* m_message = nullptr;  // over the list
 
-    bool initList(std::string const& title, std::string const& message, std::vector<CheckRow> const& rows) {
+    bool initList(std::string const& title, std::string const& message, ccColor3B messageColor, std::vector<CheckRow> const& rows) {
         if (!Popup::init(WIDTH, HEIGHT)) return false;
         setGoldTitle(this, title);
         m_message = text::label(message);
         m_mainLayer->addChildAtPosition(m_message, Anchor::Top, {0.f, -44.f});
-        this->setMessage(message, {255, 200, 80});
+        this->setMessage(message, messageColor);
 
         auto bg = NineSlice::create("square02b_001.png", {0, 0, 80, 80});
         bg->setColor({0, 0, 0});
@@ -142,7 +162,7 @@ protected:
         m_sps = core::sps();
         std::vector<CheckRow> rows;
         for (size_t i = 0; i < m_sps.size(); i++) rows.push_back({caption(m_sps[i]->name, i + 1, m_sps[i]->percent)});
-        if (!this->initList(str(Msg::ExportTitle), "", rows)) return false;
+        if (!this->initList(str(Msg::ExportTitle), "", WARNING_COLOR, rows)) return false;
         auto exportBtn = textButton(str(Msg::Export), [this](auto) { this->onExport(); });
         exportBtn->setID("export-picked-button"_spr);
         m_buttonMenu->addChildAtPosition(exportBtn, Anchor::Bottom, {0.f, 26.f});
@@ -185,71 +205,295 @@ public:
     }
 };
 
+// "Replace all" with SPs in the level: they go, saved as a version or deleted. Closing it cancels.
+class ReplacePopup : public Popup {
+protected:
+    static constexpr float WIDTH = 360.f, HEIGHT = 160.f;
+
+    geode::Function<void(core::Replace)> m_then;
+
+    bool init(size_t count, geode::Function<void(core::Replace)> then) {
+        if (!Popup::init(WIDTH, HEIGHT)) return false;
+        m_then = std::move(then);
+        setGoldTitle(this, str(Msg::Replace));
+        auto question = text::label(text::format(Msg::ReplaceQuestion, count));
+        question->limitLabelWidth(WIDTH - 40.f, 0.5f, 0.1f);
+        m_mainLayer->addChildAtPosition(question, Anchor::Center, {0.f, 16.f});
+        auto hint = text::label(str(Msg::ReplaceHint));
+        hint->limitLabelWidth(WIDTH - 40.f, 0.38f, 0.1f);
+        hint->setColor(NOTE_COLOR);
+        m_mainLayer->addChildAtPosition(hint, Anchor::Center, {0.f, -4.f});
+
+        auto save = textButton(str(Msg::SaveAndReplace), [this](auto) { this->pick(core::Replace::SaveVersion); }, 0.75f);
+        auto remove = textButton(str(Msg::DeleteAndReplace), [this](auto) { this->pick(core::Replace::Delete); }, 0.75f,
+            "GJ_button_06.png");
+        save->setID("save-and-replace-button"_spr);
+        remove->setID("delete-and-replace-button"_spr);
+        auto menu = CCMenu::create();
+        menu->setContentSize({WIDTH - 20.f, 40.f});
+        menu->setLayout(RowLayout::create()->setGap(10.f)->setAutoScale(true));
+        menu->addChild(save);
+        menu->addChild(remove);
+        menu->updateLayout();
+        m_mainLayer->addChildAtPosition(menu, Anchor::Bottom, {0.f, 30.f});
+        return true;
+    }
+
+    void pick(core::Replace how) {
+        auto then = std::move(m_then);
+        this->onClose(nullptr);
+        if (then) then(how);
+    }
+
+public:
+    CCLabelBMFont* titleLabel() { return m_title; }
+    using Popup::setTitle;
+
+    static ReplacePopup* create(size_t count, geode::Function<void(core::Replace)> then) {
+        auto ret = new ReplacePopup();
+        if (ret->init(count, std::move(then))) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+};
+
+// SPs from a file, or from a version of the level's: add the picked ones, or put them in place of the
+// level's.
 class ImportPopup : public ChecklistPopup {
 protected:
     transfer::Pack m_pack;
     geode::Function<void()> m_done;
-    bool m_confirming = false;  // Replace pressed once
 
-    bool init(transfer::Pack pack, geode::Function<void()> done) {
+    bool init(transfer::Pack pack, std::string const& title, std::string const& message, ccColor3B messageColor,
+        geode::Function<void()> done) {
         m_pack = std::move(pack);
         m_done = std::move(done);
         std::vector<CheckRow> rows;
         for (size_t i = 0; i < m_pack.items.size(); i++) {
             auto const& item = m_pack.items[i];
             CheckRow row{caption(item.name, i + 1, item.header.percent)};
-            if (item.duplicate) {
-                row.note = str(Msg::AlreadyHere);
+            if (item.repeated) {
+                row.note = str(Msg::Repeated);
                 row.enabled = false;
             }
+            // Ticked all the same: replacing takes it.
+            else if (item.here) row.note = str(Msg::AlreadyHere);
             else if (item.nearby > 0) {
                 row.note = text::format(Msg::NearYours, item.nearby, item.nearbyPercent);
-                row.noteColor = {255, 170, 60};
+                row.noteColor = NEAR_COLOR;
             }
             rows.push_back(std::move(row));
         }
-        if (!this->initList(str(Msg::ImportTitle), str(Msg::ImportWarning), rows)) return false;
-        auto add = textButton(str(Msg::Add), [this](auto) { this->finish(false); });
+        if (!this->initList(title, message, messageColor, rows)) return false;
+        auto add = textButton(str(Msg::Add), [this](auto) { this->finish(core::Replace::No); });
         auto replace = textButton(str(Msg::Replace), [this](auto) { this->onReplace(); });
+        add->setID("add-button"_spr);
+        replace->setID("replace-all-button"_spr);
         m_buttonMenu->addChildAtPosition(add, Anchor::Bottom, {-70.f, 26.f});
         m_buttonMenu->addChildAtPosition(replace, Anchor::Bottom, {70.f, 26.f});
         return true;
     }
 
     void onReplace() {
-        // The level's SPs the file holds too stay.
-        size_t aside = core::sps().size() - m_pack.inFile.size();
-        if (aside > 0 && !m_confirming) {
-            m_confirming = true;
-            this->setMessage(text::format(Msg::ConfirmReplace, aside), {255, 90, 90});
-            this->stopActionByTag(1);
-            auto expire = CCSequence::create(CCDelayTime::create(DELETE_CONFIRM_SECONDS), CallFuncExt::create([this] {
-                m_confirming = false;
-                this->setMessage(str(Msg::ImportWarning), {255, 200, 80});
-            }), nullptr);
-            expire->setTag(1);
-            this->runAction(expire);
-            return;
-        }
-        this->finish(true);
+        if (!this->anyPicked()) return core::notify(NotificationIcon::Warning, str(Msg::NothingSelected));
+        auto own = core::sps().size();
+        if (own == 0) return this->finish(core::Replace::No);
+        Ref<ImportPopup> self = this;
+        if (auto popup = ReplacePopup::create(own, [self](core::Replace how) { self->finish(how); })) popup->show();
     }
 
-    void finish(bool replace) {
+    void finish(core::Replace replace) {
         if (!this->anyPicked()) return core::notify(NotificationIcon::Warning, str(Msg::NothingSelected));
         auto result = transfer::take(m_pack, m_picked, replace);
-        if (result.failed > 0) core::notify(NotificationIcon::Warning, text::format(Msg::ImportFailed, result.failed));
-        else if (result.notMoved > 0) {
-            core::notify(NotificationIcon::Warning, text::format(Msg::NotSetAside, result.added, result.notMoved));
+        // Adding, and all of them are here.
+        if (result.added == 0 && result.failed == 0) return core::notify(NotificationIcon::Info, str(Msg::PickedAlreadyHere));
+        if (result.failed > 0) {
+            auto msg = result.saved ? Msg::ImportFailedSaved : Msg::ImportFailed;
+            core::notify(NotificationIcon::Warning, text::format(msg, result.failed));
         }
+        else if (result.notMoved > 0) {
+            auto msg = replace == core::Replace::SaveVersion ? Msg::NotSetAside : Msg::NotDeleted;
+            core::notify(NotificationIcon::Warning, text::format(msg, result.added, result.notMoved));
+        }
+        else if (result.saved) core::notify(NotificationIcon::Success, text::format(Msg::ImportedSaved, result.added));
         else core::notify(NotificationIcon::Success, text::format(Msg::Imported, result.added));
         if (m_done) m_done();
         this->onClose(nullptr);
     }
 
 public:
-    static ImportPopup* create(transfer::Pack pack, geode::Function<void()> done) {
+    static ImportPopup* create(transfer::Pack pack, std::string const& title, std::string const& message, ccColor3B messageColor,
+        geode::Function<void()> done) {
         auto ret = new ImportPopup();
-        if (ret->init(std::move(pack), std::move(done))) {
+        if (ret->init(std::move(pack), title, message, messageColor, std::move(done))) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+
+    // From a file: someone else's SPs.
+    static ImportPopup* fromFile(transfer::Pack pack, geode::Function<void()> done) {
+        return create(std::move(pack), str(Msg::ImportTitle), str(Msg::ImportWarning), WARNING_COLOR, std::move(done));
+    }
+};
+
+// The level's versions, newest first: bring one back through the import list, or delete it.
+class VersionsPopup : public Popup {
+protected:
+    static constexpr float WIDTH = 380.f, HEIGHT = 280.f;
+    static constexpr float LIST_WIDTH = 340.f, LIST_HEIGHT = 180.f, ROW_HEIGHT = 34.f;
+
+    ScrollLayer* m_list = nullptr;
+    CCLabelBMFont* m_total = nullptr;
+    std::filesystem::path m_confirming;  // delete pressed once on this version
+    geode::Function<void()> m_changed;   // the level's SPs changed
+    bool m_stale = false;                // to rebuild once on top
+
+    void refresh() {
+        m_stale = true;
+        this->rebuildIfOnTop(0.f);
+    }
+
+    void rebuildIfOnTop(float) {
+        if (!m_stale || !onTop(this)) return;
+        m_stale = false;
+        this->rebuild();
+    }
+
+    bool init(geode::Function<void()> changed) {
+        if (!Popup::init(WIDTH, HEIGHT)) return false;
+        m_changed = std::move(changed);
+        setGoldTitle(this, str(Msg::VersionsTitle));
+        m_total = text::label(str(Msg::VersionsTitle));
+        m_total->setColor(NOTE_COLOR);
+        m_mainLayer->addChildAtPosition(m_total, Anchor::Top, {0.f, -44.f});
+
+        auto bg = NineSlice::create("square02b_001.png", {0, 0, 80, 80});
+        bg->setColor({0, 0, 0});
+        bg->setOpacity(80);
+        bg->setContentSize({LIST_WIDTH + 6.f, LIST_HEIGHT + 6.f});
+        m_mainLayer->addChildAtPosition(bg, Anchor::Center, {0.f, -14.f});
+        m_list = ScrollLayer::create({LIST_WIDTH, LIST_HEIGHT});
+        m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(2.f));
+        m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {-LIST_WIDTH / 2, -14.f - LIST_HEIGHT / 2});
+        this->rebuild();
+        this->schedule(schedule_selector(VersionsPopup::rebuildIfOnTop));
+        return true;
+    }
+
+    static std::string reason(storage::Version const& v) {
+        return str(v.replaced ? Msg::VersionReplaced : Msg::VersionOld);
+    }
+
+    static std::string info(storage::Version const& v) {
+        return text::format(Msg::VersionInfo, v.sps, text::size(v.bytes));
+    }
+
+    CCNode* row(storage::Version const& v, size_t i) {
+        auto node = CCNode::create();
+        node->setContentSize({LIST_WIDTH, ROW_HEIGHT});
+        bool confirming = m_confirming == v.dir;
+        auto label = text::label(confirming ? str(Msg::ConfirmDelete) : fmt::format("{}, {}", text::date(v.time), reason(v)));
+        label->setAnchorPoint({0.f, 0.5f});
+        label->limitLabelWidth(LIST_WIDTH - 120.f, 0.42f, 0.1f);
+        if (confirming) label->setColor(CONFIRM_COLOR);
+        node->addChildAtPosition(label, Anchor::Left, {10.f, 6.f}, false);
+        auto note = text::label(v.fits ? info(v) : fmt::format("{}, {}", info(v), str(Msg::VersionDeleteOnly)));
+        note->setAnchorPoint({0.f, 0.5f});
+        note->limitLabelWidth(LIST_WIDTH - 120.f, 0.32f, 0.1f);
+        note->setColor(v.fits ? NOTE_COLOR : NEAR_COLOR);
+        node->addChildAtPosition(note, Anchor::Left, {10.f, -8.f}, false);
+
+        auto menu = CCMenu::create();
+        menu->setContentSize({110.f, ROW_HEIGHT});
+        menu->ignoreAnchorPointForPosition(false);
+        menu->setAnchorPoint({1.f, 0.5f});
+        menu->setLayout(RowLayout::create()->setGap(6.f)->setAxisAlignment(AxisAlignment::End));
+        if (v.fits) {
+            auto open = textButton(str(Msg::Open), [this, v](auto) { this->onOpen(v); }, 0.6f);
+            open->setID(fmt::format("{}/open-version-{}", Mod::get()->getID(), i));
+            menu->addChild(open);
+        }
+        auto remove = CCMenuItemExt::createSpriteExtraWithFrameName("GJ_trashBtn_001.png", 0.55f, [this, v](auto) {
+            this->onDelete(v);
+        });
+        remove->setID(fmt::format("{}/delete-version-{}", Mod::get()->getID(), i));
+        menu->addChild(remove);
+        menu->updateLayout();
+        node->addChildAtPosition(menu, Anchor::Right, {-6.f, 0.f}, false);
+        return node;
+    }
+
+    void rebuild() {
+        auto versions = storage::versions();
+        uintmax_t total = 0;
+        for (auto const& v : versions) total += v.bytes;
+        m_total->setString(text::format(Msg::VersionsTotal, versions.size(), text::size(total)).c_str());
+        m_total->limitLabelWidth(LIST_WIDTH, 0.45f, 0.1f);
+
+        auto content = m_list->m_contentLayer;
+        content->removeAllChildren();
+        for (size_t i = 0; i < versions.size(); i++) content->addChild(this->row(versions[i], i));
+        if (versions.empty()) {
+            auto hint = text::label(str(Msg::VersionsEmpty));
+            hint->limitLabelWidth(LIST_WIDTH - 20.f, 0.4f, 0.1f);
+            auto holder = CCNode::create();
+            holder->setContentSize({LIST_WIDTH, ROW_HEIGHT});
+            holder->addChildAtPosition(hint, Anchor::Center, {}, false);
+            content->addChild(holder);
+        }
+        float height = std::max(LIST_HEIGHT, (ROW_HEIGHT + 2.f) * content->getChildrenCount());
+        content->setContentSize({LIST_WIDTH, height});
+        content->updateLayout();
+        m_list->scrollToTop();
+        handleTouchPriority(this);
+    }
+
+    void onOpen(storage::Version const& v) {
+        m_confirming.clear();
+        auto pack = transfer::openVersion(v);
+        if (pack.isErr()) return core::notify(NotificationIcon::Warning, pack.unwrapErr());
+        if (pack.unwrap().sameAsLevel) return core::notify(NotificationIcon::Info, str(Msg::VersionHere));
+        Ref<VersionsPopup> self = this;
+        auto popup = ImportPopup::create(std::move(pack).unwrap(), text::format(Msg::VersionTitle, text::date(v.time)),
+            fmt::format("{}, {}", reason(v), info(v)), NOTE_COLOR, [self] {
+                // Replacing may have made a version.
+                self->refresh();
+                if (self->m_changed) self->m_changed();
+            });
+        if (popup) popup->show();
+    }
+
+    void onDelete(storage::Version const& v) {
+        if (m_confirming != v.dir) {
+            m_confirming = v.dir;
+            this->refresh();
+            confirmFor(this, [this] {
+                m_confirming.clear();
+                this->refresh();
+            });
+            return;
+        }
+        this->stopActionByTag(1);
+        m_confirming.clear();
+        bool removed = storage::removeVersion(v);
+        core::notify(removed ? NotificationIcon::Success : NotificationIcon::Warning,
+            str(removed ? Msg::VersionDeleted : Msg::VersionNotDeleted));
+        this->refresh();
+    }
+
+public:
+    CCLabelBMFont* titleLabel() { return m_title; }
+    using Popup::setTitle;
+
+    static VersionsPopup* create(geode::Function<void()> changed) {
+        auto ret = new VersionsPopup();
+        if (ret->init(std::move(changed))) {
             ret->autorelease();
             return ret;
         }
@@ -313,6 +557,18 @@ protected:
     PauseLayer* m_pause = nullptr;
     ScrollLayer* m_list = nullptr;
     core::SP m_confirming;  // delete pressed once on this SP
+    bool m_stale = false;   // to rebuild once on top
+
+    void refresh() {
+        m_stale = true;
+        this->rebuildIfOnTop(0.f);
+    }
+
+    void rebuildIfOnTop(float) {
+        if (!m_stale || !onTop(this)) return;
+        m_stale = false;
+        this->rebuild();
+    }
 
     bool init(PauseLayer* pause) {
         if (!Popup::init(WIDTH, HEIGHT)) return false;
@@ -331,12 +587,22 @@ protected:
 
         auto exportBtn = textButton(str(Msg::Export), [this](auto) { this->onExport(); });
         auto importBtn = textButton(str(Msg::Import), [this](auto) { this->onImport(); });
+        auto versionsBtn = textButton(str(Msg::Versions), [this](auto) { this->onVersions(); });
         exportBtn->setID("export-button"_spr);
         importBtn->setID("import-button"_spr);
-        m_buttonMenu->addChildAtPosition(exportBtn, Anchor::Bottom, {-70.f, 28.f});
-        m_buttonMenu->addChildAtPosition(importBtn, Anchor::Bottom, {70.f, 28.f});
+        versionsBtn->setID("versions-button"_spr);
+        m_buttonMenu->addChildAtPosition(exportBtn, Anchor::Bottom, {-115.f, 28.f});
+        m_buttonMenu->addChildAtPosition(importBtn, Anchor::Bottom, {0.f, 28.f});
+        m_buttonMenu->addChildAtPosition(versionsBtn, Anchor::Bottom, {115.f, 28.f});
         this->rebuild();
+        this->schedule(schedule_selector(SPListPopup::rebuildIfOnTop));
         return true;
+    }
+
+    void onVersions() {
+        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(Msg::CantSave));
+        Ref<SPListPopup> self = this;
+        if (auto popup = VersionsPopup::create([self] { self->refresh(); })) popup->show();
     }
 
     void onExport() {
@@ -360,12 +626,9 @@ protected:
     void onFile(std::filesystem::path const& path) {
         auto pack = transfer::open(path);
         if (pack.isErr()) return core::notify(NotificationIcon::Warning, pack.unwrapErr());
-        auto const& items = pack.unwrap().items;
-        if (std::all_of(items.begin(), items.end(), [](auto const& item) { return item.duplicate; })) {
-            return core::notify(NotificationIcon::Info, str(Msg::AllAlreadyHere));
-        }
+        if (pack.unwrap().sameAsLevel) return core::notify(NotificationIcon::Info, str(Msg::AllAlreadyHere));
         Ref<SPListPopup> self = this;
-        if (auto popup = ImportPopup::create(std::move(pack).unwrap(), [self] { self->rebuild(); })) popup->show();
+        if (auto popup = ImportPopup::fromFile(std::move(pack).unwrap(), [self] { self->refresh(); })) popup->show();
     }
 
     CCNode* row(core::SP const& sp, int number) {
@@ -442,27 +705,23 @@ protected:
 
     void onRename(core::SP const& sp) {
         m_confirming = nullptr;
-        if (auto popup = RenamePopup::create(sp, [this] { this->rebuild(); })) popup->show();
+        if (auto popup = RenamePopup::create(sp, [this] { this->refresh(); })) popup->show();
     }
 
     void onDelete(core::SP const& sp) {
         if (m_confirming != sp) {
             m_confirming = sp;
-            this->rebuild();
-            // The confirmation runs out.
-            this->stopActionByTag(1);
-            auto expire = CCSequence::create(CCDelayTime::create(DELETE_CONFIRM_SECONDS), CallFuncExt::create([this] {
+            this->refresh();
+            confirmFor(this, [this] {
                 m_confirming = nullptr;
-                this->rebuild();
-            }), nullptr);
-            expire->setTag(1);
-            this->runAction(expire);
+                this->refresh();
+            });
             return;
         }
         this->stopActionByTag(1);
         m_confirming = nullptr;
         core::remove(sp);
-        this->rebuild();
+        this->refresh();
     }
 
 public:
@@ -497,7 +756,7 @@ void openExport() {
 }
 
 void openImport(transfer::Pack pack) {
-    if (auto popup = ImportPopup::create(std::move(pack), {})) popup->show();
+    if (auto popup = ImportPopup::fromFile(std::move(pack), {})) popup->show();
 }
 
 }

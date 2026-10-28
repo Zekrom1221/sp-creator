@@ -16,8 +16,12 @@ a new best or a completion.
 ## Sharing SPs
 
 In the SP list, <cy>Export</c> saves the SPs you pick to a `.spcreator` file, and <cy>Import</c> adds the SPs
-of such a file to the level (or replaces yours: they're set aside, not deleted). SPs only fit the level version,
-game version and Low Detail Mode they were made with. Import files only from people you trust.
+of such a file to the level, or puts them in place of yours: you choose to save yours as a version or delete
+them. SPs only fit the level version, game version and Low Detail Mode they were made with. Import files only
+from people you trust.
+
+<cy>Versions</c> in the SP list holds the SPs saved that way, and those set aside when the level was updated.
+Open one to bring its SPs back, or delete the ones you don't need: nothing is deleted on its own.
 
 ## With other mods
 

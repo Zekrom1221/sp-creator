@@ -13,7 +13,6 @@
 #include <cmath>
 #include <cstring>
 #include <thread>
-#include <unordered_map>
 #include <unordered_set>
 
 // wglGetCurrentDC, for the game's window.
@@ -160,6 +159,49 @@ Result<> checkLevel(matjson::Value const& level, storage::LevelInfo const& open)
     return Ok();
 }
 
+// The items of SP files (with their names) for the open level, against its SPs; `from` for the log.
+transfer::Pack collect(std::vector<ByteVector>& files, std::vector<std::string> const& names, std::string const& from) {
+    auto const& own = core::sps();
+    // The level's SPs by content, to see which the file holds; all of them on disk first.
+    core::saveAll();
+    std::unordered_set<uint64_t> owned;
+    for (auto const& sp : own) {
+        if (auto content = storage::contentOf(*sp)) owned.insert(content);
+    }
+    std::unordered_set<uint64_t> seen;
+    transfer::Pack pack;
+    for (size_t f = 0; f < files.size(); f++) {
+        auto header = storage::readHeader(files[f]);
+        if (header.isErr()) {
+            log::warn("Import: SP {} of {}: {}", f + 1, from, header.unwrapErr());
+            pack.damaged++;
+            continue;
+        }
+        transfer::Item item;
+        item.header = header.unwrap();
+        item.file = std::move(files[f]);
+        if (f < names.size() && names[f].size() <= MAX_NAME_BYTES) item.name = names[f];
+        item.repeated = !seen.insert(item.header.content).second;
+        item.here = owned.contains(item.header.content);
+        for (size_t i = 0; i < own.size() && !item.here && !item.repeated; i++) {
+            float distance = std::abs(own[i]->percent - item.header.percent);
+            if (distance <= NEAR_PERCENT && (item.nearby == 0 || distance < std::abs(item.nearbyPercent - item.header.percent))) {
+                item.nearby = static_cast<int>(i) + 1;
+                item.nearbyPercent = own[i]->percent;
+            }
+        }
+        pack.items.push_back(std::move(item));
+    }
+    // Every SP of the level in the file, and nothing else: taking it would change nothing. (Own SPs whose
+    // content couldn't be read count as not in it.)
+    pack.sameAsLevel = !pack.items.empty() && owned.size() == own.size() &&
+        std::all_of(owned.begin(), owned.end(), [&](uint64_t c) { return seen.contains(c); }) &&
+        std::all_of(pack.items.begin(), pack.items.end(), [](auto const& item) { return item.here; });
+    std::stable_sort(pack.items.begin(), pack.items.end(), [](auto const& a, auto const& b) { return a.header.x < b.header.x; });
+    log::info("Import: {}: {} SPs, {} damaged", from, pack.items.size(), pack.damaged);
+    return pack;
+}
+
 }
 
 namespace transfer {
@@ -272,46 +314,10 @@ Result<Pack> open(std::filesystem::path const& path) {
 
         auto const& list = manifest["sps"];
         if (!list.isArray() || list.size() != files.size()) return fail(Msg::PackDamaged);
-        auto const& own = core::sps();
-        // The level's SPs by content, to see which the file holds; all of them on disk first.
-        core::saveAll();
-        std::unordered_map<uint64_t, core::SP> owned;
-        for (auto const& sp : own) {
-            if (auto content = storage::contentOf(*sp)) owned.emplace(content, sp);
-        }
-        std::unordered_set<uint64_t> seen;
-        for (auto const& [content, sp] : owned) seen.insert(content);
-        Pack pack;
-        for (size_t f = 0; f < files.size(); f++) {
-            auto header = storage::readHeader(files[f]);
-            if (header.isErr()) {
-                log::warn("Import: SP {} of {}: {}", f + 1, path, header.unwrapErr());
-                pack.damaged++;
-                continue;
-            }
-            Item item;
-            item.header = header.unwrap();
-            item.file = std::move(files[f]);
-            auto name = list[f]["name"].asString().unwrapOr("");
-            if (name.size() <= MAX_NAME_BYTES) item.name = name;
-            item.duplicate = !seen.insert(item.header.content).second;
-            if (auto it = owned.find(item.header.content); it != owned.end()) {
-                if (std::find(pack.inFile.begin(), pack.inFile.end(), it->second) == pack.inFile.end()) {
-                    pack.inFile.push_back(it->second);
-                }
-            }
-            for (size_t i = 0; i < own.size() && !item.duplicate; i++) {
-                float distance = std::abs(own[i]->percent - item.header.percent);
-                if (distance <= NEAR_PERCENT && (item.nearby == 0 || distance < std::abs(item.nearbyPercent - item.header.percent))) {
-                    item.nearby = static_cast<int>(i) + 1;
-                    item.nearbyPercent = own[i]->percent;
-                }
-            }
-            pack.items.push_back(std::move(item));
-        }
+        std::vector<std::string> names;
+        for (size_t f = 0; f < files.size(); f++) names.push_back(list[f]["name"].asString().unwrapOr(""));
+        auto pack = collect(files, names, utils::string::pathToString(path));
         if (pack.items.empty()) return fail(Msg::PackDamaged);
-        std::stable_sort(pack.items.begin(), pack.items.end(), [](auto const& a, auto const& b) { return a.header.x < b.header.x; });
-        log::info("Import: {}: {} SPs, {} damaged", path, pack.items.size(), pack.damaged);
         return Ok(std::move(pack));
     } catch (std::exception const& e) {
         log::error("Import: {}: {}", path, e.what());
@@ -319,12 +325,31 @@ Result<Pack> open(std::filesystem::path const& path) {
     }
 }
 
-core::ImportResult take(Pack const& pack, std::vector<bool> const& picked, bool replace) {
+Result<Pack> openVersion(storage::Version const& version) {
+    auto read = storage::readVersion(version);
+    if (read.isErr()) {
+        log::error("Version {}: {}", version.dir, read.unwrapErr());
+        return fail(version.fits ? Msg::VersionUnreadable : Msg::OtherVersion);
+    }
+    std::vector<ByteVector> files;
+    std::vector<std::string> names;
+    for (auto& sp : read.unwrap()) {
+        files.push_back(std::move(sp.file));
+        names.push_back(std::move(sp.name));
+    }
+    auto pack = collect(files, names, utils::string::pathToString(version.dir));
+    if (pack.items.empty()) return fail(Msg::VersionUnreadable);
+    return Ok(std::move(pack));
+}
+
+core::ImportResult take(Pack const& pack, std::vector<bool> const& picked, core::Replace replace) {
     std::vector<core::Incoming> files;
     for (size_t i = 0; i < pack.items.size() && i < picked.size(); i++) {
-        if (picked[i]) files.push_back({pack.items[i].file, pack.items[i].name});
+        auto const& item = pack.items[i];
+        if (!picked[i] || item.repeated || (item.here && replace == core::Replace::No)) continue;
+        files.push_back({item.file, item.name});
     }
-    return core::import(files, replace, pack.inFile);
+    return core::import(files, replace);
 }
 
 bool chooseFile(bool save, std::string const& levelName, geode::Function<void(std::optional<std::filesystem::path>)> then) {

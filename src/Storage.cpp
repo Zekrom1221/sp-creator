@@ -493,15 +493,19 @@ bool moveLowDetailSPs(PlayLayer* pl, std::filesystem::path const& root, std::str
 
 bool hasSPFiles(std::filesystem::path const& dir) {
     std::error_code ec;
-    for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator();
-         it.increment(ec)) {
+    auto it = std::filesystem::directory_iterator(dir, ec);
+    // A folder there that can't be read may hold some.
+    if (ec) return std::filesystem::exists(dir, ec);
+    for (; !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
         if (idFromName(it->path()) > 0) return true;
     }
-    return false;
+    return static_cast<bool>(ec);
 }
 
 // A name no folder has yet for SPs set aside: "-old" ones were made for another level version,
 // "-replaced" ones gave way to imported SPs.
+constexpr std::string_view OLD = "old", REPLACED = "replaced";
+
 std::filesystem::path asideName(std::filesystem::path const& dir, std::string_view why) {
     std::error_code ec;
     for (int n = 0;; n++) {
@@ -509,6 +513,62 @@ std::filesystem::path asideName(std::filesystem::path const& dir, std::string_vi
         aside += n == 0 ? fmt::format("-{}-{}", why, std::time(nullptr)) : fmt::format("-{}-{}-{}", why, std::time(nullptr), n);
         if (!std::filesystem::exists(aside, ec)) return aside;
     }
+}
+
+std::string nameOf(std::filesystem::path const& path) {
+    auto u8 = path.filename().u8string();
+    return std::string(u8.begin(), u8.end());
+}
+
+// The folders asideName() made for the level folder `dir`, with what they hold; `fits` against `info`.
+std::vector<storage::Version> versionsOf(std::filesystem::path const& dir, matjson::Value const& info) {
+    std::vector<storage::Version> out;
+    auto key = nameOf(dir);
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(dir.parent_path(), ec); !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+        std::error_code ec2;
+        if (!it->is_directory(ec2)) continue;
+        auto name = nameOf(it->path());
+        storage::Version v;
+        size_t timeAt = 0;
+        for (auto why : {OLD, REPLACED}) {
+            auto prefix = fmt::format("{}-{}-", key, why);
+            if (name.starts_with(prefix)) {
+                v.replaced = why == REPLACED;
+                timeAt = prefix.size();
+            }
+        }
+        if (timeAt == 0) continue;
+        long long time = 0;
+        std::from_chars(name.data() + timeAt, name.data() + name.size(), time);
+        v.time = static_cast<std::time_t>(time);
+        v.dir = it->path();
+        for (auto f = std::filesystem::directory_iterator(v.dir, ec2); !ec2 && f != std::filesystem::directory_iterator();
+             f.increment(ec2)) {
+            std::error_code ec3;
+            if (!f->is_regular_file(ec3)) continue;
+            auto size = f->file_size(ec3);
+            if (!ec3) v.bytes += size;
+            if (idFromName(f->path()) > 0) v.sps++;
+        }
+        auto saved = file::readJson(v.dir / "level.json");
+        v.fits = saved.isOk() && sameLevel(saved.unwrap(), info);
+        out.push_back(std::move(v));
+    }
+    // In the same second, the one with the "-n" asideName() added is newer.
+    std::sort(out.begin(), out.end(), [](auto const& a, auto const& b) { return a.time != b.time ? a.time > b.time : a.dir > b.dir; });
+    return out;
+}
+
+// Is `dir` a version of the open level (not the level's own folder, nor anything else)?
+bool isVersionOfLevel(std::filesystem::path const& dir) {
+    if (g_level.dir.empty() || dir.parent_path() != g_level.dir.parent_path()) return false;
+    auto name = nameOf(dir);
+    for (auto why : {OLD, REPLACED}) {
+        if (name.starts_with(fmt::format("{}-{}-", g_level.key, why))) return true;
+    }
+    return false;
 }
 
 }
@@ -555,9 +615,19 @@ Loaded load(PlayLayer* pl) {
     std::error_code ec;
     if (std::filesystem::exists(infoPath, ec)) {
         auto saved = file::readJson(infoPath);
-        if (saved.isErr() || !sameLevel(saved.unwrap(), info)) {
+        if ((saved.isErr() || !sameLevel(saved.unwrap(), info)) && !hasSPFiles(dir)) {
+            // Played before without SPs: nothing to keep, the folder is this version's now.
+            auto res = file::writeStringSafe(infoPath, info.dump());
+            if (res.isErr()) {
+                log::error("Can't write {}: {}", infoPath, res.unwrapErr());
+                return out;
+            }
+            std::filesystem::remove(dir / "names.json", ec);
+            log::info("{} changed since it was last played, it had no SPs", key);
+        }
+        else if (saved.isErr() || !sameLevel(saved.unwrap(), info)) {
             // Another version of the level (or of the game): keep its SPs aside.
-            auto aside = asideName(dir, "old");
+            auto aside = asideName(dir, OLD);
             std::filesystem::rename(dir, aside, ec);
             log::warn("SPs of {} were made for {}, this is {}: moved to {} ({})", key,
                 saved.isOk() ? saved.unwrap().dump(0) : std::string("an unreadable level.json"), info.dump(0), aside,
@@ -688,11 +758,12 @@ void saveNames(std::vector<std::shared_ptr<StartPoint>> const& sps) {
     if (res.isErr()) log::error("Can't write {}: {}", namesPath(), res.unwrapErr());
 }
 
-void remove(StartPoint const& sp) {
-    if (g_level.dir.empty()) return;
+bool remove(StartPoint const& sp) {
+    if (g_level.dir.empty()) return false;
     std::error_code ec;
     std::filesystem::remove(spPath(sp.id), ec);
     if (ec) log::error("Can't delete {}: {}", spPath(sp.id), ec.message());
+    return !ec;
 }
 
 std::optional<LevelInfo> level() {
@@ -780,14 +851,20 @@ std::vector<std::shared_ptr<StartPoint>> setAside(std::vector<std::shared_ptr<St
     std::vector<std::shared_ptr<StartPoint>> moved;
     if (g_level.dir.empty() || sps.empty()) return moved;
     std::error_code ec;
-    auto aside = asideName(g_level.dir, "replaced");
+    auto aside = asideName(g_level.dir, REPLACED);
     std::filesystem::create_directories(aside, ec);
     if (ec) {
         log::error("Can't create {}: {}", aside, ec.message());
         return moved;
     }
-    // A folder like the level's: renamed back, it would load as it was.
+    // A folder like the level's: renamed back, it would load as it was. Without its level.json it couldn't
+    // be brought back, so then nothing moves.
     std::filesystem::copy_file(g_level.dir / "level.json", aside / "level.json", ec);
+    if (ec) {
+        log::error("Can't copy level.json into {}: {}", aside, ec.message());
+        std::filesystem::remove_all(aside, ec);
+        return moved;
+    }
     auto names = matjson::Value::object();
     for (auto const& sp : sps) {
         std::filesystem::rename(spPath(sp->id), aside / spPath(sp->id).filename(), ec);
@@ -798,17 +875,67 @@ std::vector<std::shared_ptr<StartPoint>> setAside(std::vector<std::shared_ptr<St
         if (!sp->name.empty()) names[fmt::to_string(sp->id)] = sp->name;
         moved.push_back(sp);
     }
+    log::info("{} of {} SPs of {} set aside in {}", moved.size(), sps.size(), g_level.key, aside);
+    if (moved.empty()) {
+        std::filesystem::remove_all(aside, ec);
+        return moved;
+    }
     auto res = file::writeStringSafe(aside / "names.json", names.dump());
     if (res.isErr()) log::error("Can't write names into {}: {}", aside, res.unwrapErr());
-    log::info("{} of {} SPs of {} set aside in {}", moved.size(), sps.size(), g_level.key, aside);
     return moved;
+}
+
+std::vector<Version> versions() {
+    if (g_level.dir.empty()) return {};
+    auto all = versionsOf(g_level.dir, g_level.info);
+    std::erase_if(all, [](Version const& v) { return v.sps == 0; });
+    return all;
+}
+
+Result<std::vector<VersionSP>> readVersion(Version const& version) {
+    if (!isVersionOfLevel(version.dir)) return Err("not a version of this level");
+    if (!version.fits) return Err("made for another level version");
+    auto names = file::readJson(version.dir / "names.json").unwrapOr(matjson::Value::object());
+    std::vector<std::pair<int, VersionSP>> found;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(version.dir, ec); !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+        int id = idFromName(it->path());
+        std::error_code ec2;
+        if (id == 0 || it->file_size(ec2) > MAX_FILE_SIZE) continue;
+        auto bytes = file::readBinary(it->path());
+        if (bytes.isErr()) {
+            log::error("Version {}: can't read {}: {}", version.dir, it->path().filename(), bytes.unwrapErr());
+            continue;
+        }
+        auto name = names[fmt::to_string(id)].asString().unwrapOr("");
+        if (name.size() > MAX_NAME_BYTES) name.clear();
+        found.push_back({id, VersionSP{std::move(bytes).unwrap(), std::move(name)}});
+    }
+    if (ec) return Err(ec.message());
+    std::sort(found.begin(), found.end(), [](auto const& a, auto const& b) { return a.first < b.first; });
+    std::vector<VersionSP> out;
+    for (auto& [id, sp] : found) out.push_back(std::move(sp));
+    return Ok(std::move(out));
+}
+
+bool removeVersion(Version const& version) {
+    if (!isVersionOfLevel(version.dir)) {
+        log::error("Not deleting {}: not a version of {}", version.dir, g_level.key);
+        return false;
+    }
+    std::error_code ec;
+    auto removed = std::filesystem::remove_all(version.dir, ec);
+    log::info("Version {} deleted: {} files ({})", version.dir, removed, ec ? ec.message() : "ok");
+    return !ec;
 }
 
 void removeAll() {
     if (g_level.dir.empty()) return;
     std::error_code ec;
+    for (auto const& v : versionsOf(g_level.dir, g_level.info)) std::filesystem::remove_all(v.dir, ec);
     std::filesystem::remove_all(g_level.dir, ec);
-    log::info("Removed {} ({})", g_level.dir, ec ? ec.message() : "ok");
+    log::info("Removed {} and its versions ({})", g_level.dir, ec ? ec.message() : "ok");
     g_level = {};
 }
 

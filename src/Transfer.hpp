@@ -32,21 +32,24 @@ namespace transfer {
         geode::ByteVector file;
         storage::Header header;
         std::string name;
-        bool duplicate = false;  // the same as one of the level's SPs, or as an item before it
+        bool here = false;       // the same as one of the level's SPs: adding skips it, replacing takes it
+        bool repeated = false;   // the same as an item before it: never taken
         int nearby = 0;          // position of the level's SP close to it (1 on), 0 if none
         float nearbyPercent = 0;
     };
 
     struct Pack {
-        std::vector<Item> items;      // by position
-        int damaged = 0;              // SPs in the file that can't be used
-        std::vector<core::SP> inFile;  // the level's SPs the file holds too: replacing keeps them
+        std::vector<Item> items;  // by position
+        int damaged = 0;          // SPs in the file that can't be used
+        bool sameAsLevel = false; // the level has these SPs and no others
     };
 
     // Reads a file and checks it against the open level. The error is for the player.
     geode::Result<Pack> open(std::filesystem::path const& path);
-    // Adds the picked items to the level; with `replace`, in place of its own SPs.
-    core::ImportResult take(Pack const& pack, std::vector<bool> const& picked, bool replace);
+    // A version of the level's SPs, checked the same way.
+    geode::Result<Pack> openVersion(storage::Version const& version);
+    // Adds the picked items to the level, or puts them in place of its own SPs.
+    core::ImportResult take(Pack const& pack, std::vector<bool> const& picked, core::Replace replace);
 
     // The system's file dialog, from the Downloads folder: a file to save the SPs of `levelName` to, or to
     // import from. `then` gets it on the main thread, empty if cancelled. The dialog runs beside the game, as

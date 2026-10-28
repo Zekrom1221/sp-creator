@@ -2,6 +2,8 @@
 
 #include "StartPoint.hpp"
 
+#include <ctime>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -45,8 +47,9 @@ namespace storage {
     // Do nothing in a level whose SPs can't be saved; failures go to the log.
     bool save(StartPoint const& sp);
     void saveNames(std::vector<std::shared_ptr<StartPoint>> const& sps);
-    void remove(StartPoint const& sp);
-    // Smoke test: deletes the level's SP folder.
+    // False if its file couldn't be deleted (in the log).
+    bool remove(StartPoint const& sp);
+    // Smoke test: deletes the level's SP folder and its versions.
     void removeAll();
 
     // Export and import (Transfer.cpp), in the open level.
@@ -73,7 +76,27 @@ namespace storage {
     // SP files (passed through readHeader) loaded and saved under ids from `nextId` on: an SP per file,
     // null where it didn't work (in the log). Reads the checkpoints, which PersistenceAPI doesn't check.
     std::vector<std::shared_ptr<StartPoint>> add(std::vector<geode::ByteSpan> const& files, int& nextId);
-    // Moves the files of SPs of the level into a folder of their own (with their names), out of the
-    // way of imported ones: those it moved.
+    // Moves the files of SPs of the level into a folder of their own (with their names), a version of
+    // them, out of the way of imported ones: those it moved.
     std::vector<std::shared_ptr<StartPoint>> setAside(std::vector<std::shared_ptr<StartPoint>> const& sps);
+
+    // SPs set aside in a folder next to the level's: by "Replace all" (setAside), or by load() for another
+    // version of the level. Kept until the player deletes them.
+    struct Version {
+        std::filesystem::path dir;
+        bool replaced = false;  // by "Replace all"; otherwise for another level version
+        std::time_t time = 0;
+        int sps = 0;
+        uintmax_t bytes = 0;    // all its files
+        bool fits = false;      // made for the open level's version: can be brought back
+    };
+    // The open level's versions that hold SPs, newest first.
+    std::vector<Version> versions();
+    struct VersionSP {
+        geode::ByteVector file;
+        std::string name;
+    };
+    // A version's SP files (to pass through readHeader), with their names. Only of a version that fits.
+    geode::Result<std::vector<VersionSP>> readVersion(Version const& version);
+    bool removeVersion(Version const& version);
 }

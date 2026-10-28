@@ -1025,9 +1025,9 @@ void smokeTransfer() {
         }
         auto const& items = pack.unwrap().items;
         auto count = [&](auto pred) { return std::count_if(items.begin(), items.end(), pred); };
-        log::info("Smoke test: import of {}: {} SPs, {} already here, {} near one, {} damaged", what, items.size(),
-            count([](auto const& i) { return i.duplicate; }), count([](auto const& i) { return i.nearby > 0; }),
-            pack.unwrap().damaged);
+        log::info("Smoke test: import of {}: {} SPs, {} already here, {} repeated, {} near one, {} damaged, the level's own {}",
+            what, items.size(), count([](auto const& i) { return i.here; }), count([](auto const& i) { return i.repeated; }),
+            count([](auto const& i) { return i.nearby > 0; }), pack.unwrap().damaged, pack.unwrap().sameAsLevel);
         return std::move(pack).unwrap();
     };
     auto pack = check("the export", path);
@@ -1080,23 +1080,79 @@ void smokeTransfer() {
         for (auto const& sp : g_session.sps) ids.push_back(sp->id);
         return fmt::format("{} ({})", ids.size(), fmt::join(ids, ","));
     };
-    // As a file of other SPs: none of the level's are in it, so all of them go aside.
-    for (auto& item : pack->items) item.duplicate = false;
-    pack->inFile.clear();
-    auto result = transfer::take(*pack, std::vector<bool>(pack->items.size(), true), true);
-    log::info("Smoke test: replaced by the import: {} added, {} failed, {} not set aside, SPs now {}", result.added,
-        result.failed, result.notMoved, ids());
-    // The last one deleted, the file again: replacing keeps the two the file holds and adds the third.
+    auto versions = [] {
+        std::vector<std::string> list;
+        for (auto const& v : storage::versions()) {
+            list.push_back(fmt::format("{}: {} SPs, {} KB, {}{}", utils::string::pathToString(v.dir.filename()), v.sps,
+                v.bytes / 1024, v.replaced ? "replaced" : "old", v.fits ? "" : ", doesn't fit"));
+        }
+        return fmt::format("{} [{}]", list.size(), fmt::join(list, "; "));
+    };
+    auto all = [](transfer::Pack const& p) { return std::vector<bool>(p.items.size(), true); };
+    // The file in place of the level's SPs, the same ones: they go to a version, and come in again.
+    auto result = transfer::take(*pack, all(*pack), core::Replace::SaveVersion);
+    log::info("Smoke test: replaced by the import, saving a version: {} added, {} failed, {} not gone, SPs now {}, versions {}",
+        result.added, result.failed, result.notMoved, ids(), versions());
+    auto level = storage::level();
+    auto list = storage::versions();
+    if (!level || list.empty()) return log::error("Smoke test: no version");
+    // The last one deleted: the version brings it back.
     if (g_session.sps.size() == 3) {
         removeSP(PlayLayer::get(), g_session.sps.back());
-        auto again = transfer::open(path);
-        if (again.isErr()) return log::error("Smoke test: the export refused: {}", again.unwrapErr());
-        std::vector<bool> picked;
-        for (auto const& item : again.unwrap().items) picked.push_back(!item.duplicate);
-        auto kept = transfer::take(again.unwrap(), picked, true);
-        log::info("Smoke test: replace with 2 of 3 here: {} in the file kept, {} added, {} not set aside, SPs now {}",
-            again.unwrap().inFile.size(), kept.added, kept.notMoved, ids());
+        auto version = transfer::openVersion(list.front());
+        if (version.isErr()) return log::error("Smoke test: the version refused: {}", version.unwrapErr());
+        auto const& items = version.unwrap().items;
+        log::info("Smoke test: the version: {} SPs, {} already here, the level's own {}", items.size(),
+            std::count_if(items.begin(), items.end(), [](auto const& i) { return i.here; }), version.unwrap().sameAsLevel);
+        auto added = transfer::take(version.unwrap(), all(version.unwrap()), core::Replace::No);
+        log::info("Smoke test: the version added: {} added, SPs now {}", added.added, ids());
+        auto again = transfer::openVersion(list.front());
+        if (again.isErr()) return log::error("Smoke test: the version refused: {}", again.unwrapErr());
+        log::info("Smoke test: the version again: the level's own {}", again.unwrap().sameAsLevel);
+        // In place of the level's, deleting them: no other version.
+        auto replaced = transfer::take(again.unwrap(), all(again.unwrap()), core::Replace::Delete);
+        log::info("Smoke test: replaced by the version, deleting: {} added, {} not gone, SPs now {}, versions {}", replaced.added,
+            replaced.notMoved, ids(), versions());
     }
+    // Deleting the level's SPs while one of the new ones fails: they're saved instead.
+    if (!g_session.sps.empty()) {
+        auto file = storage::fileOf(*g_session.sps.front());
+        ByteVector junk(4096, 0x41);
+        if (file.isOk()) {
+            auto partly = core::import({{file.unwrap(), ""}, {junk, ""}}, core::Replace::Delete);
+            log::info("Smoke test: deleting with one of two failing: {} added, {} failed, saved {}, SPs now {}, versions {}",
+                partly.added, partly.failed, partly.saved, ids(), versions());
+        }
+    }
+    // One made for another version of the level: listed, refused, deleted like the others.
+    std::error_code ec2;
+    auto old = list.front().dir.parent_path() / (level->key + "-old-1000000000");
+    std::filesystem::create_directories(old, ec2);
+    auto identity = level->identity;
+    identity["version"] = identity["version"].asInt().unwrapOr(0) + 1;
+    (void)file::writeString(old / "level.json", identity.dump());
+    for (auto it = std::filesystem::directory_iterator(list.front().dir, ec2); !ec2 && it != std::filesystem::directory_iterator();
+         it.increment(ec2)) {
+        if (it->path().extension() == ".spc") {
+            std::filesystem::copy_file(it->path(), old / it->path().filename(), ec2);
+            break;
+        }
+    }
+    log::info("Smoke test: with one for another level version: versions {}", versions());
+    for (auto const& v : storage::versions()) {
+        if (v.fits) continue;
+        auto refused = transfer::openVersion(v);
+        log::info("Smoke test: opening it: {}", refused.isErr() ? refused.unwrapErr() : std::string("opened"));
+    }
+    // Never the level's own folder.
+    storage::Version own;
+    own.dir = list.front().dir.parent_path() / level->key;
+    log::info("Smoke test: deleting the level's own folder as a version: {}, it's there {}", storage::removeVersion(own),
+        std::filesystem::exists(own.dir / "level.json", ec2));
+    int removed = 0;
+    for (auto const& v : storage::versions()) removed += storage::removeVersion(v);
+    log::info("Smoke test: deleted {} versions, versions now {}, folders there {} {}", removed, versions(),
+        std::filesystem::exists(list.front().dir, ec2), std::filesystem::exists(old, ec2));
 }
 
 // At the level start: SPs from a file, as on another computer.
@@ -1105,8 +1161,8 @@ void smokeImport() {
     auto pack = transfer::open(path);
     if (pack.isErr()) return log::error("Smoke test: import of {} refused: {}", path, pack.unwrapErr());
     std::vector<bool> picked;
-    for (auto const& item : pack.unwrap().items) picked.push_back(!item.duplicate);
-    auto result = transfer::take(pack.unwrap(), picked, false);
+    for (auto const& item : pack.unwrap().items) picked.push_back(!item.here && !item.repeated);
+    auto result = transfer::take(pack.unwrap(), picked, core::Replace::No);
     log::info("Smoke test: imported from {}: {} added, {} failed, {} SPs now", path, result.added, result.failed,
         g_session.sps.size());
 }
@@ -1133,6 +1189,40 @@ void captureScreen(std::string const& name) {
     bool ok = image && image->saveToFile(utils::string::pathToString(path).c_str(), false);
     CC_SAFE_RELEASE(image);
     log::info("Smoke test: screen saved to {}: {}", path, ok);
+}
+
+// Touch priorities of the popups on screen, the top one last: menus of the popups below it must come after
+// its own layer (a higher number), or they'd take clicks meant for it.
+void logTouchPriorities(std::string_view when) {
+    std::vector<FLAlertLayer*> popups;
+    for (auto child : CCArrayExt<CCNode*>(CCScene::get()->getChildren())) {
+        if (auto popup = typeinfo_cast<FLAlertLayer*>(child)) popups.push_back(popup);
+    }
+    if (popups.empty()) return;
+    auto priority = [](CCTouchDelegate* d) {
+        auto handler = CCTouchDispatcher::get()->findHandler(d);
+        return handler ? handler->getPriority() : INT_MAX;
+    };
+    int top = priority(popups.back());
+    bool fine = true;
+    std::vector<std::string> parts;
+    for (size_t i = 0; i < popups.size(); i++) {
+        int low = INT_MAX, high = INT_MIN;
+        std::function<void(CCNode*)> walk = [&](CCNode* node) {
+            if (!node->getChildren()) return;
+            for (auto child : CCArrayExt<CCNode*>(node->getChildren())) {
+                if (auto menu = typeinfo_cast<CCMenu*>(child)) {
+                    low = std::min(low, priority(menu));
+                    high = std::max(high, priority(menu));
+                }
+                walk(child);
+            }
+        };
+        walk(popups[i]);
+        if (i + 1 < popups.size() && low <= top) fine = false;
+        parts.push_back(fmt::format("{} {} (menus {} to {})", typeid(*popups[i]).name(), priority(popups[i]), low, high));
+    }
+    log::info("Smoke test: touch priorities {}: {}: {}", when, fine ? "fine" : "a popup below takes clicks", fmt::join(parts, "; "));
 }
 
 void pressButton(std::string_view id) {
@@ -1246,7 +1336,52 @@ void smokeUI(int stage) {
         }
         case 8:
             captureScreen("smoke-import.png");
+            pressButton("replace-all-button"_spr);
+            return next();
+        case 9:
+            captureScreen("smoke-replace.png");
+            g_lastNotice.clear();
+            pressButton("save-and-replace-button"_spr);
+            return next();
+        case 10:
+            log::info("Smoke test: replaced: notice \"{}\", {} SPs", g_lastNotice, sps.size());
+            describeNotice();
+            pressButton("versions-button"_spr);
+            return next();
+        case 11:
+            captureScreen("smoke-versions.png");
+            pressButton(fmt::format("{}/open-version-0", Mod::get()->getID()));
+            return next();
+        case 12:
+            captureScreen("smoke-version.png");
+            logTouchPriorities("with a version open");
+            // The popups below rebuild their lists meanwhile.
+            pressButton("add-button"_spr);
+            return next();
+        case 13: {
+            logTouchPriorities("after adding from the version");
+            // A delete confirmation that runs out under the next popup rebuilds the list below it.
+            pressButton(fmt::format("{}/delete-version-0", Mod::get()->getID()));
+            pressButton(fmt::format("{}/open-version-0", Mod::get()->getID()));
+            return next(3.2f);
+        }
+        case 14: {
+            logTouchPriorities("after a delete confirmation ran out below");
+            // Back to the SP list (the first popup): it rebuilds once on top.
+            std::vector<FLAlertLayer*> above;
+            for (auto child : CCArrayExt<CCNode*>(CCScene::get()->getChildren())) {
+                if (auto popup = typeinfo_cast<FLAlertLayer*>(child)) above.push_back(popup);
+            }
+            for (size_t i = above.size(); i-- > 1;) above[i]->keyBackClicked();
+            return next();
+        }
+        case 15: {
+            logTouchPriorities("back at the SP list");
+            auto popup = CCScene::get()->getChildByType<FLAlertLayer>(0);
+            auto list = popup ? findFirstChildRecursive<ScrollLayer>(popup, [](auto) { return true; }) : nullptr;
+            log::info("Smoke test: SP list rows: {} for {} SPs", list ? list->m_contentLayer->getChildrenCount() : 0, sps.size());
             return finishSmokeTest();
+        }
         // The file dialogs through the buttons, as a player goes: export the SPs, then import that file (all
         // of it already here). tools/answer_dialogs.ps1 fills the dialogs in, from outside the game.
         case 20:
@@ -1485,7 +1620,7 @@ void saveAll() {
     saveUnsaved();
 }
 
-ImportResult import(std::vector<Incoming> const& files, bool replace, std::vector<SP> const& keep) {
+ImportResult import(std::vector<Incoming> const& files, Replace replace) {
     ImportResult out;
     auto pl = PlayLayer::get();
     if (!pl || files.empty()) return out;
@@ -1497,14 +1632,25 @@ ImportResult import(std::vector<Incoming> const& files, bool replace, std::vecto
     for (auto const& sp : added) (sp ? out.added : out.failed)++;
     // Nothing came in: the level's SPs stay, even when replacing.
     if (out.added == 0) return out;
-    if (replace) {
-        std::vector<SP> aside;
-        for (auto const& sp : s.sps) {
-            if (std::find(keep.begin(), keep.end(), sp) == keep.end()) aside.push_back(sp);
+    if (replace == Replace::Delete && out.failed > 0) {
+        // One that failed may be the same as one of the level's: deleted, it would be gone.
+        log::warn("Import: {} SPs failed, the level's are saved as a version instead of deleted", out.failed);
+        replace = Replace::SaveVersion;
+    }
+    if (replace != Replace::No) {
+        auto own = s.sps;
+        std::vector<SP> gone;
+        if (replace == Replace::SaveVersion) {
+            gone = storage::setAside(own);
+            out.saved = !gone.empty();
         }
-        auto moved = storage::setAside(aside);
-        out.notMoved = static_cast<int>(aside.size() - moved.size());
-        for (auto const& sp : moved) dropSP(pl, sp);
+        else {
+            for (auto const& sp : own) {
+                if (storage::remove(*sp)) gone.push_back(sp);
+            }
+        }
+        out.notMoved = static_cast<int>(own.size() - gone.size());
+        for (auto const& sp : gone) dropSP(pl, sp);
     }
     for (size_t i = 0; i < added.size(); i++) {
         auto const& sp = added[i];
@@ -1516,7 +1662,10 @@ ImportResult import(std::vector<Incoming> const& files, bool replace, std::vecto
     }
     storage::saveNames(s.sps);
     log::info("Imported {} SPs ({} failed){}: {} in the level", out.added, out.failed,
-        replace ? fmt::format(", replacing all but {} ({} not set aside)", keep.size(), out.notMoved) : "", s.sps.size());
+        replace == Replace::No ? std::string()
+            : fmt::format(", replacing the level's ({}, {} not gone)", replace == Replace::SaveVersion ? "saved" : "deleted",
+                out.notMoved),
+        s.sps.size());
     return out;
 }
 

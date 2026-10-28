@@ -2,6 +2,7 @@
 
 #include <Geode/Geode.hpp>
 
+#include <ctime>
 #include <string>
 #include <string_view>
 
@@ -38,17 +39,21 @@ namespace text {
         ExportTitle,
         ImportTitle,
         ImportWarning,
-        ConfirmReplace,   // {count}
         Add,
         Replace,
         AlreadyHere,
+        Repeated,
         NearYours,        // {position} {percent}
         NothingSelected,
+        PickedAlreadyHere,
         Exported,         // {count}
         ExportFailed,
         Imported,         // {count}
+        ImportedSaved,    // {count}
         ImportFailed,     // {count}
+        ImportFailedSaved, // {count}
         NotSetAside,      // {imported} {not set aside}
+        NotDeleted,       // {imported} {not deleted}
         AllAlreadyHere,
         NotAPack,
         NewerFormat,
@@ -60,6 +65,27 @@ namespace text {
         ForLowDetail,
         ForFullDetail,
         FileType,
+        // "Replace all" and versions of the level's SPs.
+        ReplaceQuestion,  // {count}
+        ReplaceHint,
+        SaveAndReplace,
+        DeleteAndReplace,
+        Versions,
+        VersionsTitle,
+        VersionsTotal,    // {count} {size}
+        VersionsEmpty,
+        VersionReplaced,
+        VersionOld,
+        VersionInfo,      // {count} {size}
+        VersionDeleteOnly,
+        Open,
+        VersionTitle,     // {date}
+        VersionHere,
+        VersionDeleted,
+        VersionNotDeleted,
+        VersionUnreadable,
+        Kilobytes,        // {size}
+        Megabytes,        // {size}
         Count,
     };
 
@@ -70,6 +96,10 @@ namespace text {
     std::string format(Msg msg, Args&&... args) {
         return fmt::format(fmt::runtime(tr(msg)), std::forward<Args>(args)...);
     }
+
+    // "1.7 MB", "120 KB"; "2026-10-28 14:05" (in Russian "28.10.2026 14:05"), local time.
+    std::string size(uintmax_t bytes);
+    std::string date(std::time_t time);
 
     // Fonts for text that may be in Russian (or in a name the player typed).
     char const* font();       // instead of bigFont.fnt

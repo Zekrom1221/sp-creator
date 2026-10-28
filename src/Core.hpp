@@ -37,11 +37,18 @@ namespace core {
         geode::ByteSpan file;  // checked with storage::readHeader
         std::string name;
     };
+    // What importing does with the level's own SPs.
+    enum class Replace {
+        No,           // they stay, the new ones come in beside them
+        SaveVersion,  // they go to a version (storage::setAside), to bring back from the SP list
+        Delete,
+    };
     struct ImportResult {
         int added = 0, failed = 0;
-        int notMoved = 0;  // replacing: SPs of the level that couldn't be set aside
+        int notMoved = 0;  // replacing: SPs of the level that couldn't be set aside or deleted
+        bool saved = false;  // replacing: the level's SPs went to a version
     };
-    // Adds SPs from files to the level; with `replace`, the level's own SPs but those in `keep` are set
-    // aside once some of the new ones are in (on disk, not deleted).
-    ImportResult import(std::vector<Incoming> const& files, bool replace, std::vector<SP> const& keep = {});
+    // Adds SPs from files to the level; replacing, all of the level's own SPs go once some of the new
+    // ones are in. If some failed, they go to a version even when deleting them was asked.
+    ImportResult import(std::vector<Incoming> const& files, Replace replace);
 }
