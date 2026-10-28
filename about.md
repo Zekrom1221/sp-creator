@@ -13,6 +13,12 @@ a new best or a completion.
 - <cy>Delete</c>: delete the SP you start from
 - The <cg>SP</c> button in the pause menu lists your SPs: play, rename, delete
 
+## Sharing SPs
+
+In the SP list, <cy>Export</c> saves the SPs you pick to a `.spcreator` file, and <cy>Import</c> adds the SPs
+of such a file to the level (or replaces yours: they're set aside, not deleted). SPs only fit the level version,
+game version and Low Detail Mode they were made with. Import files only from people you trust.
+
 ## With other mods
 
 - **Startpos switchers** (Startpos Switcher, Mega Hack) list your SPs with the level's startposes. An SP placed in

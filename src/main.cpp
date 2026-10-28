@@ -10,6 +10,7 @@
 #include "StartPoint.hpp"
 #include "Storage.hpp"
 #include "Text.hpp"
+#include "Transfer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -171,6 +172,7 @@ void setNoticeText(Notification* n, std::string const& text) {
 }
 
 void notify(std::string const& text, NotificationIcon icon = NotificationIcon::Info) {
+    log::info("Notice: {}", text);
     auto now = std::chrono::steady_clock::now();
     // On screen and not fading out yet: change it in place, which also restarts its timer.
     if (g_notice && g_notice->isShowing() && now - g_noticeAt < std::chrono::milliseconds(1200)) {
@@ -641,8 +643,9 @@ bool switchSP(int dir) {
     return true;
 }
 
-// Deletes an SP; restarts that went to it go to the one before it (or the level start).
-void removeSP(PlayLayer* pl, std::shared_ptr<StartPoint> const& sp) {
+// Takes an SP out of the level, its file left as it is; restarts that went to it go to the one before it
+// (or the level start).
+void dropSP(PlayLayer* pl, std::shared_ptr<StartPoint> const& sp) {
     auto& s = g_session;
     int i = indexOf(sp);
     if (i < 0) return;
@@ -651,6 +654,13 @@ void removeSP(PlayLayer* pl, std::shared_ptr<StartPoint> const& sp) {
     retireObject(pl, *sp);
     if (g_rec.tailFor == sp) g_rec.tailFor = nullptr;
     std::erase(s.unsaved, sp);
+}
+
+// Deletes an SP; restarts that went to it go to the one before it (or the level start).
+void removeSP(PlayLayer* pl, std::shared_ptr<StartPoint> const& sp) {
+    auto& s = g_session;
+    if (indexOf(sp) < 0) return;
+    dropSP(pl, sp);
     storage::remove(*sp);
     if (!sp->name.empty()) storage::saveNames(s.sps);
     log::info("SP {} deleted", sp->id);
@@ -711,6 +721,14 @@ struct SmokeTest {
     int externalStep = 0;
     bool externalOn = false;
     bool externalDone = false;
+    // Files in the mod save dir: the SPs exported to one once tested (and its variants checked, and the SPs
+    // replaced by it), or imported from one at the level start.
+    std::string exportTo;
+    bool exported = false;
+    std::string importFrom;
+    // The level's Low Detail Mode as it was, given back at the end.
+    Ref<GJGameLevel> level;
+    std::optional<bool> lowDetailWas;
 };
 
 constexpr int EXTERNAL_KEY_STEPS = 600;
@@ -847,6 +865,15 @@ void startSmokeTest() {
             g_smoke.externalKeys.push_back(static_cast<enumKeyCodes>(std::toupper(static_cast<unsigned char>(key[0]))));
         }
     }
+    g_smoke.level = level;
+    if (auto ldm = root["low_detail"].asBool(); ldm.isOk()) {
+        log::info("Smoke test: Low Detail Mode {} -> {} (the level has the option: {})", level->m_lowDetailModeToggled,
+            ldm.unwrap(), level->m_lowDetailMode);
+        g_smoke.lowDetailWas = level->m_lowDetailModeToggled;
+        level->m_lowDetailModeToggled = ldm.unwrap();
+    }
+    g_smoke.exportTo = root["export_to"].asString().unwrapOr("");
+    g_smoke.importFrom = root["import_from"].asString().unwrapOr("");
     if (g_smoke.placeAtX.empty()) g_smoke.stepsLeft = 60;
     log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}", id,
         level->m_levelName, level->m_stars.value(), g_smoke.placeAtX.size(), g_smoke.reference.size(), g_smoke.cleanup,
@@ -948,8 +975,126 @@ bool smokeCompat(PlayLayer* pl) {
     }
 }
 
+void restoreSmokeLevel() {
+    auto& t = g_smoke;
+    if (t.level && t.lowDetailWas) t.level->m_lowDetailModeToggled = *t.lowDetailWas;
+    t.lowDetailWas.reset();
+}
+
+// Export and import: the SPs go to a file, which is checked against the level, then variants of it that
+// must be refused (another level, mode, game or level version; damaged), then the file replaces the
+// SPs (forced: they're the same SPs), and the next attempts start from the imported ones.
+void smokeTransfer() {
+    auto& t = g_smoke;
+    auto dir = Mod::get()->getSaveDir();
+    auto path = dir / t.exportTo;
+    int packed = 0;
+    auto exported = transfer::pack(g_session.sps, packed);
+    if (exported.isErr()) {
+        log::error("Smoke test: export failed: {}", exported.unwrapErr());
+        return;
+    }
+    auto const& bytes = exported.unwrap();
+    auto written = file::writeBinarySafe(path, bytes);
+    log::info("Smoke test: exported {} of {} SPs to {}: {} KB, written {}", packed, g_session.sps.size(), path,
+        bytes.size() / 1024, written.isOk());
+    auto check = [](std::string_view what, std::filesystem::path const& file) -> std::optional<transfer::Pack> {
+        auto pack = transfer::open(file);
+        if (pack.isErr()) {
+            log::info("Smoke test: import of {}: refused: {}", what, pack.unwrapErr());
+            return std::nullopt;
+        }
+        auto const& items = pack.unwrap().items;
+        auto count = [&](auto pred) { return std::count_if(items.begin(), items.end(), pred); };
+        log::info("Smoke test: import of {}: {} SPs, {} already here, {} near one, {} damaged", what, items.size(),
+            count([](auto const& i) { return i.duplicate; }), count([](auto const& i) { return i.nearby > 0; }),
+            pack.unwrap().damaged);
+        return std::move(pack).unwrap();
+    };
+    auto pack = check("the export", path);
+    // The export again, changed on the way.
+    auto variant = [&](std::string_view what, geode::Function<void(transfer::Raw&)> change) {
+        auto raw = transfer::split(bytes);
+        if (raw.isErr()) return log::error("Smoke test: no variant {}: {}", what, raw.unwrapErr());
+        change(raw.unwrap());
+        auto file = dir / "smoke-variant.spcreator";
+        (void)file::writeBinary(file, transfer::join(raw.unwrap()));
+        check(what, file);
+    };
+    variant("another level", [](transfer::Raw& r) { r.manifest["level"]["key"] = "online-1"; });
+    variant("Low Detail Mode", [](transfer::Raw& r) {
+        r.manifest["level"]["key"] = r.manifest["level"]["key"].asString().unwrapOr("") + "-ldm";
+    });
+    variant("another game version", [](transfer::Raw& r) { r.manifest["level"]["identity"]["game"] = "2.2074"; });
+    variant("another level version", [](transfer::Raw& r) {
+        r.manifest["level"]["identity"]["version"] = r.manifest["level"]["identity"]["version"].asInt().unwrapOr(0) + 1;
+    });
+    variant("a newer format", [](transfer::Raw& r) { r.manifest["format"] = 2; });
+    variant("one SP damaged", [](transfer::Raw& r) {
+        if (!r.files.empty()) r.files[0][r.files[0].size() / 2] ^= 0x5a;
+    });
+    variant("an SP more than pack.json lists", [](transfer::Raw& r) {
+        if (!r.files.empty()) r.files.push_back(r.files[0]);
+    });
+    for (auto [what, keep] : {std::pair{"cut off", 0.5}, std::pair{"not a file of the mod", 0.0}}) {
+        auto file = dir / "smoke-variant.spcreator";
+        ByteVector cut(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(bytes.size() * keep));
+        if (keep == 0.0) cut.assign(4096, 0x41);
+        (void)file::writeBinary(file, cut);
+        check(what, file);
+    }
+    {
+        // pack.json nested a million deep: matjson would recurse until the stack runs out.
+        ByteVector deep(bytes.begin(), bytes.begin() + 8);
+        uint32_t size = 1000000;
+        deep.insert(deep.end(), reinterpret_cast<uint8_t*>(&size), reinterpret_cast<uint8_t*>(&size) + 4);
+        deep.insert(deep.end(), size, '[');
+        auto file = dir / "smoke-variant.spcreator";
+        (void)file::writeBinary(file, deep);
+        check("pack.json nested deep", file);
+    }
+    std::error_code ec;
+    std::filesystem::remove(dir / "smoke-variant.spcreator", ec);
+    if (!pack) return;
+    auto ids = [] {
+        std::vector<int> ids;
+        for (auto const& sp : g_session.sps) ids.push_back(sp->id);
+        return fmt::format("{} ({})", ids.size(), fmt::join(ids, ","));
+    };
+    // As a file of other SPs: none of the level's are in it, so all of them go aside.
+    for (auto& item : pack->items) item.duplicate = false;
+    pack->inFile.clear();
+    auto result = transfer::take(*pack, std::vector<bool>(pack->items.size(), true), true);
+    log::info("Smoke test: replaced by the import: {} added, {} failed, {} not set aside, SPs now {}", result.added,
+        result.failed, result.notMoved, ids());
+    // The last one deleted, the file again: replacing keeps the two the file holds and adds the third.
+    if (g_session.sps.size() == 3) {
+        removeSP(PlayLayer::get(), g_session.sps.back());
+        auto again = transfer::open(path);
+        if (again.isErr()) return log::error("Smoke test: the export refused: {}", again.unwrapErr());
+        std::vector<bool> picked;
+        for (auto const& item : again.unwrap().items) picked.push_back(!item.duplicate);
+        auto kept = transfer::take(again.unwrap(), picked, true);
+        log::info("Smoke test: replace with 2 of 3 here: {} in the file kept, {} added, {} not set aside, SPs now {}",
+            again.unwrap().inFile.size(), kept.added, kept.notMoved, ids());
+    }
+}
+
+// At the level start: SPs from a file, as on another computer.
+void smokeImport() {
+    auto path = Mod::get()->getSaveDir() / g_smoke.importFrom;
+    auto pack = transfer::open(path);
+    if (pack.isErr()) return log::error("Smoke test: import of {} refused: {}", path, pack.unwrapErr());
+    std::vector<bool> picked;
+    for (auto const& item : pack.unwrap().items) picked.push_back(!item.duplicate);
+    auto result = transfer::take(pack.unwrap(), picked, false);
+    log::info("Smoke test: imported from {}: {} added, {} failed, {} SPs now", path, result.added, result.failed,
+        g_session.sps.size());
+}
+
 void finishSmokeTest() {
     saveUnsaved();
+    restoreSmokeLevel();
     if (g_smoke.cleanup) storage::removeAll();
     log::info("Smoke test done");
     geode::utils::game::exit(false);
@@ -1053,6 +1198,18 @@ void smokeUI(int stage) {
         }
         case 6:
             captureScreen("smoke-rename.png");
+            splist::openExport();
+            return next();
+        case 7: {
+            captureScreen("smoke-export.png");
+            // The SPs of an earlier test, placed at the same x: close to these, or the same.
+            auto pack = transfer::open(Mod::get()->getSaveDir() / "smoke-export.spcreator");
+            if (pack.isOk()) splist::openImport(std::move(pack).unwrap());
+            else log::warn("Smoke test: no import list: {}", pack.unwrapErr());
+            return next();
+        }
+        case 8:
+            captureScreen("smoke-import.png");
             return finishSmokeTest();
     }
 }
@@ -1071,12 +1228,17 @@ void nextSmokePhase() {
         t.externalOn = false;
         t.refIndex = -1;
     }
-    if (t.tested >= g_session.sps.size() && !t.deathPhase && !g_session.sps.empty() && smokeCompat(pl)) return;
     if (t.tested > 0 && !t.deathPhase && t.compat == 0) {
         float x = pl->m_player1->m_position.x;
         log::info("Smoke test: SP {} attempt, x {:.1f} to {:.1f}: {} hits, original run {}", g_session.sps[t.tested - 1]->id,
             t.phaseStartX, x, g_rec.hits, firstRunHits(t.phaseStartX, x));
     }
+    if (!t.exportTo.empty() && !t.exported && t.tested >= g_session.sps.size() && !g_session.sps.empty()) {
+        t.exported = true;
+        smokeTransfer();
+        t.tested = 0;  // the imported SPs get their attempts too
+    }
+    if (t.tested >= g_session.sps.size() && !t.deathPhase && !g_session.sps.empty() && smokeCompat(pl)) return;
     if (t.tested < g_session.sps.size()) {
         auto sp = g_session.sps[t.tested++];
         choose(sp, true);
@@ -1195,6 +1357,8 @@ void notifyLoaded(storage::Loaded const& loaded, size_t count) {
         case Notice::LevelChanged: notify(warn, Msg::LevelChanged); break;
         case Notice::CantSave: notify(warn, Msg::CantSave); break;
         case Notice::CantMoveAside: notify(warn, Msg::CantMoveAside); break;
+        case Notice::SPsWithLowDetail: notify(warn, Msg::SPsWithLowDetail); break;
+        case Notice::SPsWithoutLowDetail: notify(warn, Msg::SPsWithoutLowDetail); break;
     }
 }
 
@@ -1230,6 +1394,49 @@ void remove(SP const& sp) {
 void rename(SP const& sp, std::string name) {
     sp->name = std::move(name);
     storage::saveNames(g_session.sps);
+}
+
+void notify(NotificationIcon icon, std::string const& text) {
+    ::notify(text, icon);
+}
+
+void saveAll() {
+    saveUnsaved();
+}
+
+ImportResult import(std::vector<Incoming> const& files, bool replace, std::vector<SP> const& keep) {
+    ImportResult out;
+    auto pl = PlayLayer::get();
+    if (!pl || files.empty()) return out;
+    auto& s = g_session;
+    saveUnsaved();
+    std::vector<ByteSpan> bytes;
+    for (auto const& f : files) bytes.push_back(f.file);
+    auto added = storage::add(bytes, s.nextId);
+    for (auto const& sp : added) (sp ? out.added : out.failed)++;
+    // Nothing came in: the level's SPs stay, even when replacing.
+    if (out.added == 0) return out;
+    if (replace) {
+        std::vector<SP> aside;
+        for (auto const& sp : s.sps) {
+            if (std::find(keep.begin(), keep.end(), sp) == keep.end()) aside.push_back(sp);
+        }
+        auto moved = storage::setAside(aside);
+        out.notMoved = static_cast<int>(aside.size() - moved.size());
+        for (auto const& sp : moved) dropSP(pl, sp);
+    }
+    for (size_t i = 0; i < added.size(); i++) {
+        auto const& sp = added[i];
+        if (!sp) continue;
+        sp->name = files[i].name;
+        auto at = std::upper_bound(s.sps.begin(), s.sps.end(), sp->x, [](float x, auto const& o) { return x < o->x; });
+        s.sps.insert(at, sp);
+        addObjectFor(pl, *sp);
+    }
+    storage::saveNames(s.sps);
+    log::info("Imported {} SPs ({} failed){}: {} in the level", out.added, out.failed,
+        replace ? fmt::format(", replacing all but {} ({} not set aside)", keep.size(), out.notMoved) : "", s.sps.size());
+    return out;
 }
 
 }
@@ -1347,6 +1554,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         // their unique IDs) whatever the SPs.
         for (auto const& sp : g_session.sps) addObjectFor(this, *sp);
         notifyLoaded(loaded, g_session.sps.size());
+        if (g_smoke.active && !g_smoke.importFrom.empty()) smokeImport();
     }
 
     void resetLevel() {
@@ -1381,6 +1589,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         if (g_smoke.active) {
             // Left midway: its noclip and the rest end here.
             log::warn("Smoke test: the level was quit, test stopped");
+            restoreSmokeLevel();
             g_smoke = SmokeTest{};
             g_smokeTakeover = false;
         }

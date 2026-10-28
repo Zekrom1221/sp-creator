@@ -30,6 +30,36 @@ namespace text {
         RenameTitle,
         NamePlaceholder,
         Save,
+        SPsWithLowDetail,
+        SPsWithoutLowDetail,
+        // Export and import.
+        Export,
+        Import,
+        ExportTitle,
+        ImportTitle,
+        ImportWarning,
+        ConfirmReplace,   // {count}
+        Add,
+        Replace,
+        AlreadyHere,
+        NearYours,        // {position} {percent}
+        NothingSelected,
+        Exported,         // {count}
+        ExportFailed,
+        Imported,         // {count}
+        ImportFailed,     // {count}
+        NotSetAside,      // {imported} {not set aside}
+        AllAlreadyHere,
+        NotAPack,
+        NewerFormat,
+        PackDamaged,
+        PackTooBig,
+        OtherLevel,       // {level name}
+        OtherVersion,
+        OtherGame,        // {game version}
+        ForLowDetail,
+        ForFullDetail,
+        FileType,
         Count,
     };
 

@@ -57,6 +57,9 @@ std::filesystem::path g_root = "levels";
 struct Level {
     std::filesystem::path dir;  // empty: this level's SPs aren't saved
     uint64_t stamp = 0;         // level key and version, written into every SP file
+    std::string key;
+    std::string name;
+    matjson::Value info;        // as in level.json
 } g_level;
 
 // persistenceAPI::Stream opens files by a std::string path, which MSVC reads in the ANSI code page: a
@@ -68,7 +71,11 @@ public:
         m_stream = new std::fstream(path, std::ios::binary | (write ? std::ios::out | std::ios::trunc : std::ios::in));
         m_bytesRead = bytesRead;
         m_PAVersion = PA_VERSION;
-        return m_stream->good();
+        if (!m_stream->good()) return false;
+        // PersistenceAPI reads counts and sizes without checking them: in a file that doesn't hold what they
+        // say, it would go on past the end. This makes that throw, for readSP to catch.
+        if (!write) m_stream->exceptions(std::ios::failbit | std::ios::badbit);
+        return true;
     }
 
     bool good() const {
@@ -76,8 +83,10 @@ public:
     }
 };
 
-uint64_t hashBytes(void const* data, size_t size) {
-    uint64_t h = 1469598103934665603ull;  // FNV-1a
+constexpr uint64_t FNV_OFFSET = 1469598103934665603ull;
+
+// FNV-1a; `h` carries a hash on over several pieces.
+uint64_t hashBytes(void const* data, size_t size, uint64_t h = FNV_OFFSET) {
     auto bytes = static_cast<unsigned char const*>(data);
     for (size_t i = 0; i < size; i++) {
         h ^= bytes[i];
@@ -98,6 +107,21 @@ std::string levelKey(GJGameLevel* level) {
         }
         default: return id > 0 ? fmt::format("online-{}", id) : std::string();
     }
+}
+
+// Low Detail Mode leaves the level's high detail objects out (8063 of BPATA's 96395), and checkpoints refer
+// to objects by their place: SPs only fit the mode they were placed in, so each mode has its own. Levels
+// without the mode's option keep one set. With the mode off the folder keeps the plain key (older SPs).
+constexpr std::string_view LOW_DETAIL_SUFFIX = "-ldm";
+
+bool lowDetail(PlayLayer* pl) {
+    return pl->m_lowDetailMode && pl->m_level->m_lowDetailMode;
+}
+
+int highDetailObjects(PlayLayer* pl) {
+    int count = 0;
+    for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) count += obj->m_isHighDetail;
+    return count;
 }
 
 matjson::Value identity(PlayLayer* pl) {
@@ -312,20 +336,22 @@ void writeSP(Stream& out, StartPoint const& sp) {
 
 enum class ReadError { None, Damaged, Other };
 
-std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, std::string& error, ReadError& kind) {
-    kind = ReadError::Other;
-    // PersistenceAPI checks nothing it reads, so the whole file is checked against its seal first:
-    // past that it is exactly what save() wrote.
-    auto data = file::readBinary(path);
-    if (data.isErr()) {
-        error = fmt::format("can't read it: {}", data.unwrapErr());
-        return nullptr;
-    }
-    auto const& bytes = data.unwrap();
-    if (bytes.size() < sizeof(MAGIC) + 64 + SEAL_SIZE) {
-        kind = ReadError::Damaged;
+// Where the parts of an SP file before its frames are (writeSP).
+constexpr size_t FORMAT_AT = sizeof(MAGIC), STAMP_AT = FORMAT_AT + 4, ID_AT = STAMP_AT + 8, X_AT = ID_AT + 4,
+    PERCENT_AT = X_AT + 4;
+constexpr size_t MIN_FILE_SIZE = sizeof(MAGIC) + 64 + SEAL_SIZE;
+// Far above what an SP of BPATA (96k objects) takes, 250-800 KB.
+constexpr size_t MAX_FILE_SIZE = 32 * 1024 * 1024;
+
+// Is the file whole, as save() wrote it? Its size without the seal, 0 if not.
+size_t sealedBody(ByteSpan bytes, std::string& error) {
+    if (bytes.size() < MIN_FILE_SIZE) {
         error = "too short";
-        return nullptr;
+        return 0;
+    }
+    if (bytes.size() > MAX_FILE_SIZE) {
+        error = "too big";
+        return 0;
     }
     size_t bodySize = bytes.size() - SEAL_SIZE;
     uint64_t hash = 0;
@@ -333,11 +359,22 @@ std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, st
     std::memcpy(&hash, bytes.data() + bodySize, sizeof(hash));
     std::memcpy(&end, bytes.data() + bodySize + sizeof(hash), sizeof(end));
     if (end != END_MARKER || hash != hashBytes(bytes.data(), bodySize)) {
-        kind = ReadError::Damaged;
         error = "damaged (cut off or changed)";
-        return nullptr;
+        return 0;
     }
+    return bodySize;
+}
 
+// The same SP has the same hash whatever its id (the one part an import changes).
+uint64_t contentHash(ByteSpan bytes, size_t bodySize) {
+    uint32_t noId = 0;
+    auto h = hashBytes(bytes.data(), ID_AT);
+    h = hashBytes(&noId, sizeof(noId), h);
+    return hashBytes(bytes.data() + ID_AT + 4, bodySize - ID_AT - 4, h);
+}
+
+std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int id, size_t bodySize, std::string& error,
+    ReadError& kind) {
     unsigned int bytesRead = 0;
     FileStream in;
     if (!in.open(path, false, &bytesRead)) {
@@ -407,12 +444,69 @@ std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, st
     return sp;
 }
 
-// A name for the folder of SPs made for another level version that no folder has yet.
-std::filesystem::path asideName(std::filesystem::path const& dir) {
+std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, std::string& error, ReadError& kind) {
+    kind = ReadError::Other;
+    // PersistenceAPI checks nothing it reads, so the whole file is checked against its seal first:
+    // past that it is exactly what save() wrote.
+    auto data = file::readBinary(path);
+    if (data.isErr()) {
+        error = fmt::format("can't read it: {}", data.unwrapErr());
+        return nullptr;
+    }
+    size_t bodySize = sealedBody(data.unwrap(), error);
+    if (bodySize == 0) {
+        kind = ReadError::Damaged;
+        return nullptr;
+    }
+    try {
+        return readSealedSP(path, id, bodySize, error, kind);
+    } catch (std::exception const& e) {
+        // Whole, but not what an SP file holds (an imported file can be anything).
+        kind = ReadError::Damaged;
+        error = fmt::format("not readable: {}", e.what());
+        return nullptr;
+    }
+}
+
+// SPs placed with Low Detail Mode on before each mode had its own folder are in the plain one: they go
+// to the low detail folder. Their level.json tells them apart, by the number of objects. False if they
+// couldn't be moved: then they'd be seen in the wrong mode, so SPs are off in this level.
+bool moveLowDetailSPs(PlayLayer* pl, std::filesystem::path const& root, std::string const& key, matjson::Value const& info) {
+    if (!pl->m_level->m_lowDetailMode) return true;
+    auto plain = root / key;
+    auto low = root / (key + std::string(LOW_DETAIL_SUFFIX));
+    std::error_code ec;
+    if (std::filesystem::exists(low, ec) || !std::filesystem::exists(plain / "level.json", ec)) return true;
+    auto saved = file::readJson(plain / "level.json");
+    if (saved.isErr()) return true;
+    auto lowInfo = info;
+    if (!lowDetail(pl)) {
+        int high = highDetailObjects(pl);
+        if (high == 0) return true;  // the same objects either way
+        lowInfo["objects"] = static_cast<int>(pl->m_objects->count()) - high;
+    }
+    if (!sameLevel(saved.unwrap(), lowInfo)) return true;
+    std::filesystem::rename(plain, low, ec);
+    log::info("SPs of {} were placed with Low Detail Mode on: moved to {} ({})", key, low, ec ? ec.message() : "ok");
+    return !ec;
+}
+
+bool hasSPFiles(std::filesystem::path const& dir) {
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+        if (idFromName(it->path()) > 0) return true;
+    }
+    return false;
+}
+
+// A name no folder has yet for SPs set aside: "-old" ones were made for another level version,
+// "-replaced" ones gave way to imported SPs.
+std::filesystem::path asideName(std::filesystem::path const& dir, std::string_view why) {
     std::error_code ec;
     for (int n = 0;; n++) {
         auto aside = dir;
-        aside += n == 0 ? fmt::format("-old-{}", std::time(nullptr)) : fmt::format("-old-{}-{}", std::time(nullptr), n);
+        aside += n == 0 ? fmt::format("-{}-{}", why, std::time(nullptr)) : fmt::format("-{}-{}-{}", why, std::time(nullptr), n);
         if (!std::filesystem::exists(aside, ec)) return aside;
     }
 }
@@ -432,8 +526,9 @@ void beforeCreatingObjects() {
 Loaded load(PlayLayer* pl) {
     Loaded out;
     g_level = {};
-    auto key = levelKey(pl->m_level);
-    if (key.empty()) return out;
+    auto plainKey = levelKey(pl->m_level);
+    if (plainKey.empty()) return out;
+    auto key = lowDetail(pl) ? plainKey + std::string(LOW_DETAIL_SUFFIX) : plainKey;
     // The game adds its anticheat spike (a spike at 0,105) after the level's objects, with an ID one past
     // its place in m_objects. Give it the ID of its place, which no other object has (the check below
     // makes sure), so that references to it load too.
@@ -449,15 +544,20 @@ Loaded load(PlayLayer* pl) {
         return out;
     }
 
-    auto dir = Mod::get()->getSaveDir() / g_root / key;
+    auto root = Mod::get()->getSaveDir() / g_root;
+    auto dir = root / key;
     auto info = identity(pl);
+    if (!moveLowDetailSPs(pl, root, plainKey, info)) {
+        out.notice = Notice::CantMoveAside;
+        return out;
+    }
     auto infoPath = dir / "level.json";
     std::error_code ec;
     if (std::filesystem::exists(infoPath, ec)) {
         auto saved = file::readJson(infoPath);
         if (saved.isErr() || !sameLevel(saved.unwrap(), info)) {
             // Another version of the level (or of the game): keep its SPs aside.
-            auto aside = asideName(dir);
+            auto aside = asideName(dir, "old");
             std::filesystem::rename(dir, aside, ec);
             log::warn("SPs of {} were made for {}, this is {}: moved to {} ({})", key,
                 saved.isOk() ? saved.unwrap().dump(0) : std::string("an unreadable level.json"), info.dump(0), aside,
@@ -479,7 +579,12 @@ Loaded load(PlayLayer* pl) {
         }
     }
     g_level.dir = dir;
-    g_level.stamp = levelStamp(key, info);
+    // From the key without the mode: SPs placed with Low Detail Mode before its folder of their own came
+    // carry that stamp. The number of objects tells the modes apart all the same.
+    g_level.stamp = levelStamp(plainKey, info);
+    g_level.key = key;
+    g_level.name = pl->m_level->m_levelName;
+    g_level.info = info;
 
     auto start = std::chrono::steady_clock::now();
     int failed = 0;
@@ -519,6 +624,13 @@ Loaded load(PlayLayer* pl) {
     out.failed = failed;
     if (failed > 0) out.notice = Notice::Failed;
     else if (!out.sps.empty() && out.notice == Notice::None) out.notice = Notice::Loaded;
+    else if (out.sps.empty() && out.notice == Notice::None && pl->m_level->m_lowDetailMode) {
+        // The player's SPs may be in the other mode's folder.
+        bool low = lowDetail(pl);
+        if (hasSPFiles(root / (low ? plainKey : plainKey + std::string(LOW_DETAIL_SUFFIX)))) {
+            out.notice = low ? Notice::SPsWithoutLowDetail : Notice::SPsWithLowDetail;
+        }
+    }
     return out;
 }
 
@@ -581,6 +693,115 @@ void remove(StartPoint const& sp) {
     std::error_code ec;
     std::filesystem::remove(spPath(sp.id), ec);
     if (ec) log::error("Can't delete {}: {}", spPath(sp.id), ec.message());
+}
+
+std::optional<LevelInfo> level() {
+    if (g_level.dir.empty()) return std::nullopt;
+    return LevelInfo{g_level.key, g_level.name, g_level.info};
+}
+
+bool fits(matjson::Value const& identity) {
+    return !g_level.dir.empty() && sameLevel(identity, g_level.info);
+}
+
+Result<ByteVector> fileOf(StartPoint const& sp) {
+    if (g_level.dir.empty()) return Err("SPs of this level aren't saved");
+    return file::readBinary(spPath(sp.id));
+}
+
+Result<Header> readHeader(ByteSpan bytes) {
+    std::string error;
+    size_t body = sealedBody(bytes, error);
+    if (body == 0) return Err(error);
+    if (std::memcmp(bytes.data(), MAGIC, sizeof(MAGIC)) != 0) return Err("not an SP file");
+    int format = 0;
+    uint64_t stamp = 0;
+    Header header;
+    std::memcpy(&format, bytes.data() + FORMAT_AT, sizeof(format));
+    std::memcpy(&stamp, bytes.data() + STAMP_AT, sizeof(stamp));
+    std::memcpy(&header.x, bytes.data() + X_AT, sizeof(header.x));
+    std::memcpy(&header.percent, bytes.data() + PERCENT_AT, sizeof(header.percent));
+    if (format != FORMAT_VERSION) return Err(fmt::format("format {}, not {}", format, FORMAT_VERSION));
+    if (stamp != g_level.stamp) return Err("made for another level or version");
+    if (!std::isfinite(header.x) || !std::isfinite(header.percent)) return Err("no position");
+    header.content = contentHash(bytes, body);
+    return Ok(header);
+}
+
+uint64_t contentOf(StartPoint const& sp) {
+    auto bytes = fileOf(sp);
+    if (bytes.isErr()) return 0;
+    std::string error;
+    size_t body = sealedBody(bytes.unwrap(), error);
+    return body == 0 ? 0 : contentHash(bytes.unwrap(), body);
+}
+
+std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files, int& nextId) {
+    std::vector<std::shared_ptr<StartPoint>> added;
+    for (auto bytes : files) {
+        if (g_level.dir.empty()) {
+            added.push_back(nullptr);
+            continue;
+        }
+        int id = nextId++;
+        auto path = spPath(id);
+        auto temp = path;
+        temp += ".tmp";
+        std::error_code ec;
+        std::string error;
+        std::shared_ptr<StartPoint> sp;
+        // Read back the way load() reads it, and in place only if that worked.
+        auto written = file::writeBinary(temp, bytes);
+        if (written.isErr()) {
+            error = written.unwrapErr();
+        } else {
+            ReadError kind;
+            sp = readSP(temp, id, error, kind);
+            if (sp) {
+                std::filesystem::rename(temp, path, ec);
+                if (ec) {
+                    error = ec.message();
+                    sp = nullptr;
+                }
+            }
+        }
+        if (!sp) {
+            log::error("Imported SP not added: {}", error);
+            std::filesystem::remove(temp, ec);
+        } else {
+            log::info("Imported SP added as SP {} at x {:.1f} ({:.2f}%)", id, sp->x, sp->percent);
+        }
+        added.push_back(sp);
+    }
+    return added;
+}
+
+std::vector<std::shared_ptr<StartPoint>> setAside(std::vector<std::shared_ptr<StartPoint>> const& sps) {
+    std::vector<std::shared_ptr<StartPoint>> moved;
+    if (g_level.dir.empty() || sps.empty()) return moved;
+    std::error_code ec;
+    auto aside = asideName(g_level.dir, "replaced");
+    std::filesystem::create_directories(aside, ec);
+    if (ec) {
+        log::error("Can't create {}: {}", aside, ec.message());
+        return moved;
+    }
+    // A folder like the level's: renamed back, it would load as it was.
+    std::filesystem::copy_file(g_level.dir / "level.json", aside / "level.json", ec);
+    auto names = matjson::Value::object();
+    for (auto const& sp : sps) {
+        std::filesystem::rename(spPath(sp->id), aside / spPath(sp->id).filename(), ec);
+        if (ec) {
+            log::error("Can't move SP {} aside: {}", sp->id, ec.message());
+            continue;
+        }
+        if (!sp->name.empty()) names[fmt::to_string(sp->id)] = sp->name;
+        moved.push_back(sp);
+    }
+    auto res = file::writeStringSafe(aside / "names.json", names.dump());
+    if (res.isErr()) log::error("Can't write names into {}: {}", aside, res.unwrapErr());
+    log::info("{} of {} SPs of {} set aside in {}", moved.size(), sps.size(), g_level.key, aside);
+    return moved;
 }
 
 void removeAll() {

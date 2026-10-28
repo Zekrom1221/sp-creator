@@ -10,6 +10,7 @@ add_library(${PROJECT_NAME} SHARED
     src/SPList.cpp
     src/Storage.cpp
     src/Text.cpp
+    src/Transfer.cpp
 )
 
 if (NOT DEFINED ENV{GEODE_SDK})
