@@ -6,13 +6,18 @@
 #include <Geode/utils/string.hpp>
 
 #include <ShlObj.h>
-#include <commdlg.h>
+#include <shobjidl.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
+
+// wglGetCurrentDC, for the game's window.
+#pragma comment(lib, "opengl32.lib")
 
 using namespace geode::prelude;
 using text::Msg;
@@ -82,6 +87,62 @@ std::string fileName(std::string const& levelName) {
     while (!name.empty() && (name.back() == '.' || name.back() == ' ')) name.pop_back();
     if (name.empty()) name = "SPs";
     return name + transfer::EXTENSION;
+}
+
+std::atomic<bool> g_dialogOpen = false;
+
+// On the dialog's own thread. Like Geode's (nfd): the common item dialog, which leaves the current folder
+// alone (the game finds its files from it).
+std::optional<std::filesystem::path> showDialog(bool save, HWND owner, std::wstring const& typeName, std::wstring const& name,
+    std::filesystem::path const& folder, HRESULT& result) {
+    std::optional<std::filesystem::path> chosen;
+    result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(result)) return chosen;
+    IFileDialog* dialog = nullptr;
+    result = CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&dialog));
+    if (SUCCEEDED(result)) {
+        auto pattern = utils::string::utf8ToWide(fmt::format("*{}", transfer::EXTENSION));
+        COMDLG_FILTERSPEC type{typeName.c_str(), pattern.c_str()};
+        dialog->SetFileTypes(1, &type);
+        dialog->SetDefaultExtension(pattern.c_str() + 2);
+        FILEOPENDIALOGOPTIONS options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | (save ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST));
+        IShellItem* item = nullptr;
+        if (!folder.empty() && SUCCEEDED(SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&item)))) {
+            dialog->SetDefaultFolder(item);
+            item->Release();
+            item = nullptr;
+        }
+        if (save) dialog->SetFileName(name.c_str());
+        result = dialog->Show(owner);
+        if (SUCCEEDED(result)) result = dialog->GetResult(&item);
+        if (SUCCEEDED(result)) {
+            PWSTR path = nullptr;
+            result = item->GetDisplayName(SIGDN_FILESYSPATH, &path);
+            if (SUCCEEDED(result)) chosen = std::filesystem::path(path);
+            CoTaskMemFree(path);
+            item->Release();
+        }
+        dialog->Release();
+    }
+    CoUninitialize();
+    return chosen;
+}
+
+// A name typed with another extension ("sps.txt") gets the mod's added, which the dialog's overwrite
+// question didn't cover: then a name no file has.
+std::filesystem::path withExtension(std::filesystem::path path) {
+    if (utils::string::toLower(utils::string::pathToString(path.extension())) == transfer::EXTENSION) return path;
+    auto base = path;
+    path += transfer::EXTENSION;
+    std::error_code ec;
+    for (int n = 2; std::filesystem::exists(path, ec); n++) {
+        path = base;
+        path += fmt::format(" ({}){}", n, transfer::EXTENSION);
+    }
+    return path;
 }
 
 // Is the file's level the open one, the same version, the same mode? The error says how it isn't.
@@ -266,50 +327,30 @@ core::ImportResult take(Pack const& pack, std::vector<bool> const& picked, bool 
     return core::import(files, replace, pack.inFile);
 }
 
-std::optional<std::filesystem::path> chooseFile(bool save, std::string const& levelName) {
-    // Wide strings with the parts the dialog wants separated by nulls.
-    auto filter = utils::string::utf8ToWide(fmt::format("{} (*{})", text::tr(Msg::FileType), EXTENSION));
-    filter += L'\0';
-    filter += utils::string::utf8ToWide(fmt::format("*{}", EXTENSION));
-    filter += L'\0';
-    std::vector<wchar_t> file(32768, L'\0');
-    if (save) {
-        auto name = utils::string::utf8ToWide(fileName(levelName));
-        std::copy_n(name.begin(), std::min(name.size(), file.size() - 1), file.begin());
+bool chooseFile(bool save, std::string const& levelName, geode::Function<void(std::optional<std::filesystem::path>)> then) {
+    if (g_dialogOpen.exchange(true)) {
+        log::info("A file dialog is open already");
+        return false;
     }
+    log::info("File dialog: {}", save ? "save" : "open");
+    // The game's window owns the dialog: it takes no clicks meanwhile (Geode finds it the same way).
+    HWND owner = WindowFromDC(wglGetCurrentDC());
+    auto typeName = utils::string::utf8ToWide(fmt::format("{} (*{})", text::tr(Msg::FileType), EXTENSION));
+    auto name = save ? utils::string::utf8ToWide(fileName(levelName)) : std::wstring();
     auto folder = defaultFolder();
-    auto extension = utils::string::utf8ToWide(EXTENSION + 1);
-
-    OPENFILENAMEW dialog{};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.hwndOwner = GetActiveWindow();
-    dialog.lpstrFilter = filter.c_str();
-    dialog.lpstrFile = file.data();
-    dialog.nMaxFile = static_cast<DWORD>(file.size());
-    dialog.lpstrInitialDir = folder.empty() ? nullptr : folder.c_str();
-    dialog.lpstrDefExt = extension.c_str();
-    dialog.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
-    // The game finds its files from the current folder, which the open dialog changes whatever the flags say.
-    std::error_code ec;
-    auto current = std::filesystem::current_path(ec);
-    BOOL chosen = save ? GetSaveFileNameW(&dialog) : GetOpenFileNameW(&dialog);
-    if (!current.empty()) std::filesystem::current_path(current, ec);
-    if (!chosen) {
-        if (auto error = CommDlgExtendedError()) log::error("File dialog failed: {:#x}", error);
-        return std::nullopt;
-    }
-    std::filesystem::path path(file.data());
-    // A name typed with another extension ("sps.txt") gets the mod's added, which the dialog's overwrite
-    // question didn't cover: then a name no file has.
-    if (save && utils::string::toLower(utils::string::pathToString(path.extension())) != EXTENSION) {
-        auto base = path;
-        path += EXTENSION;
-        for (int n = 2; std::filesystem::exists(path, ec); n++) {
-            path = base;
-            path += fmt::format(" ({}){}", n, EXTENSION);
-        }
-    }
-    return path;
+    std::thread([=, then = std::move(then)]() mutable {
+        HRESULT result = S_OK;
+        auto path = showDialog(save, owner, typeName, name, folder, result);
+        geode::queueInMainThread([path = std::move(path), result, save, then = std::move(then)]() mutable {
+            g_dialogOpen = false;
+            if (FAILED(result) && result != HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+                log::error("File dialog failed: {:#x}", static_cast<uint32_t>(result));
+            }
+            if (path && save) path = withExtension(*path);
+            then(std::move(path));
+        });
+    }).detach();
+    return true;
 }
 
 }

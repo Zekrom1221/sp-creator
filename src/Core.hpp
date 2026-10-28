@@ -25,6 +25,9 @@ namespace core {
     void remove(SP const& sp);
     void rename(SP const& sp, std::string name);
 
+    // Changes with every level entered; 0 out of levels. Tells whether a file dialog came back to the
+    // level it was opened in.
+    int session();
     // The mod's one notification.
     void notify(geode::NotificationIcon icon, std::string const& text);
     // Writes the SPs not written yet.

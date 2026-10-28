@@ -144,6 +144,7 @@ protected:
         for (size_t i = 0; i < m_sps.size(); i++) rows.push_back({caption(m_sps[i]->name, i + 1, m_sps[i]->percent)});
         if (!this->initList(str(Msg::ExportTitle), "", rows)) return false;
         auto exportBtn = textButton(str(Msg::Export), [this](auto) { this->onExport(); });
+        exportBtn->setID("export-picked-button"_spr);
         m_buttonMenu->addChildAtPosition(exportBtn, Anchor::Bottom, {0.f, 26.f});
         return true;
     }
@@ -158,16 +159,18 @@ protected:
         auto data = transfer::pack(picked, packed);
         if (data.isErr()) return core::notify(NotificationIcon::Error, data.unwrapErr());
         auto level = storage::level();
-        auto path = transfer::chooseFile(true, level ? level->name : "");
-        if (!path) return;
-        if (path->extension() != transfer::EXTENSION) *path += transfer::EXTENSION;
-        if (auto written = file::writeBinarySafe(*path, data.unwrap()); written.isErr()) {
-            log::error("Export: can't write {}: {}", *path, written.unwrapErr());
-            return core::notify(NotificationIcon::Error, str(Msg::ExportFailed));
-        }
-        log::info("Exported {} SPs to {}", packed, *path);
-        core::notify(NotificationIcon::Success, text::format(Msg::Exported, packed));
-        this->onClose(nullptr);
+        auto bytes = std::make_shared<ByteVector>(std::move(data).unwrap());
+        bool opened = transfer::chooseFile(true, level ? level->name : "", [bytes, packed](std::optional<std::filesystem::path> path) {
+            if (!path) return;
+            if (auto written = file::writeBinarySafe(*path, *bytes); written.isErr()) {
+                log::error("Export: can't write {}: {}", *path, written.unwrapErr());
+                return core::notify(NotificationIcon::Error, str(Msg::ExportFailed));
+            }
+            log::info("Exported {} SPs to {}", packed, *path);
+            core::notify(NotificationIcon::Success, text::format(Msg::Exported, packed));
+        });
+        // The SPs are in hand: the dialog finishes without the list.
+        if (opened) this->onClose(nullptr);
     }
 
 public:
@@ -328,6 +331,8 @@ protected:
 
         auto exportBtn = textButton(str(Msg::Export), [this](auto) { this->onExport(); });
         auto importBtn = textButton(str(Msg::Import), [this](auto) { this->onImport(); });
+        exportBtn->setID("export-button"_spr);
+        importBtn->setID("import-button"_spr);
         m_buttonMenu->addChildAtPosition(exportBtn, Anchor::Bottom, {-70.f, 28.f});
         m_buttonMenu->addChildAtPosition(importBtn, Anchor::Bottom, {70.f, 28.f});
         this->rebuild();
@@ -342,9 +347,18 @@ protected:
 
     void onImport() {
         if (!storage::level()) return core::notify(NotificationIcon::Warning, str(Msg::CantSave));
-        auto path = transfer::chooseFile(false);
-        if (!path) return;
-        auto pack = transfer::open(*path);
+        int session = core::session();
+        Ref<SPListPopup> self = this;
+        transfer::chooseFile(false, "", [self, session](std::optional<std::filesystem::path> path) {
+            // Cancelled, or the level was left (or the game went on) meanwhile.
+            auto pl = PlayLayer::get();
+            if (!path || core::session() != session || !pl || !pl->m_isPaused) return;
+            self->onFile(*path);
+        });
+    }
+
+    void onFile(std::filesystem::path const& path) {
+        auto pack = transfer::open(path);
         if (pack.isErr()) return core::notify(NotificationIcon::Warning, pack.unwrapErr());
         auto const& items = pack.unwrap().items;
         if (std::all_of(items.begin(), items.end(), [](auto const& item) { return item.duplicate; })) {

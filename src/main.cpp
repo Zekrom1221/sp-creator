@@ -121,6 +121,7 @@ struct Stats {
 };
 
 Session g_session;
+int g_sessionCount = 0;  // levels entered
 Recording g_rec;
 Playback g_play;
 Stats g_stats;
@@ -149,30 +150,43 @@ unsigned int g_noticeFrame = 0;  // frame it was shown in
 
 // Notification has its label in bigFont, which has no Cyrillic letters: text that needs the mod's font
 // goes into a label of the mod's beside it, with the notification's own one left empty.
+// Long text is made smaller to fit the screen: the notification grows with its label, past the screen's edges.
+// Geode's label scale, and what's left of the notification's width for the label (it has its icon too).
+constexpr float NOTICE_LABEL_SCALE = 0.6f;
+constexpr float NOTICE_ICON_WIDTH = 40.f;
+
 void setNoticeText(Notification* n, std::string const& text) {
     constexpr auto OWN_LABEL = "text"_spr;
+    float maxWidth = CCDirector::get()->getWinSize().width * 0.9f / n->getScale() - NOTICE_ICON_WIDTH;
     auto own = findFirstChildRecursive<CCLabelBMFont>(n, [&](CCLabelBMFont* l) { return l->getID() == OWN_LABEL; });
+    auto label = findFirstChildRecursive<CCLabelBMFont>(n, [&](CCLabelBMFont* l) { return l->getID() != OWN_LABEL; });
     auto font = text::fontFor(text);
     if (std::string_view(font) == "bigFont.fnt") {
         if (own) own->removeFromParent();
         n->setString(text);
+        if (label) {
+            label->limitLabelWidth(maxWidth, NOTICE_LABEL_SCALE, 0.1f);
+            n->setString(text);  // laid out again at that size
+        }
         return;
     }
     if (!own) {
-        auto label = findFirstChildRecursive<CCLabelBMFont>(n, [](auto) { return true; });
         if (!label || !label->getParent()) return n->setString(text);
         own = CCLabelBMFont::create("", font);
         own->setID(OWN_LABEL);
-        own->setScale(label->getScale());
         // After the icon, which setIcon adds at the end.
         label->getParent()->addChild(own, 1);
     }
     own->setString(text.c_str());
+    own->limitLabelWidth(maxWidth, NOTICE_LABEL_SCALE, 0.1f);
     n->setString("");  // lays the notification out again, around the mod's label
 }
 
+std::string g_lastNotice;  // the smoke test waits for some
+
 void notify(std::string const& text, NotificationIcon icon = NotificationIcon::Info) {
     log::info("Notice: {}", text);
+    g_lastNotice = text;
     auto now = std::chrono::steady_clock::now();
     // On screen and not fading out yet: change it in place, which also restarts its timer.
     if (g_notice && g_notice->isShowing() && now - g_noticeAt < std::chrono::milliseconds(1200)) {
@@ -726,6 +740,10 @@ struct SmokeTest {
     std::string exportTo;
     bool exported = false;
     std::string importFrom;
+    // UI: the file dialogs through the buttons instead of renaming and the lists (tools/answer_dialogs.ps1).
+    bool dialogs = false;
+    unsigned int waitFrom = 0;
+    int waits = 0;
     // The level's Low Detail Mode as it was, given back at the end.
     Ref<GJGameLevel> level;
     std::optional<bool> lowDetailWas;
@@ -874,6 +892,7 @@ void startSmokeTest() {
     }
     g_smoke.exportTo = root["export_to"].asString().unwrapOr("");
     g_smoke.importFrom = root["import_from"].asString().unwrapOr("");
+    g_smoke.dialogs = root["dialogs"].asBool().unwrapOr(false);
     if (g_smoke.placeAtX.empty()) g_smoke.stepsLeft = 60;
     log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}", id,
         level->m_levelName, level->m_stars.value(), g_smoke.placeAtX.size(), g_smoke.reference.size(), g_smoke.cleanup,
@@ -1116,6 +1135,12 @@ void captureScreen(std::string const& name) {
     log::info("Smoke test: screen saved to {}: {}", path, ok);
 }
 
+void pressButton(std::string_view id) {
+    auto btn = typeinfo_cast<CCMenuItemSpriteExtra*>(CCScene::get()->getChildByIDRecursive(id));
+    log::info("Smoke test: pressing {}: {}", id, btn ? "found" : "not there");
+    if (btn) btn->activate();
+}
+
 // The mod's UI, one step every half second: a notification, the pause menu, the SP list, renaming.
 void smokeUI(int stage) {
     auto pl = PlayLayer::get();
@@ -1138,6 +1163,13 @@ void smokeUI(int stage) {
             }
         };
         collect(g_notice);
+        // Its box against the screen: it has to fit.
+        if (auto bg = g_notice->getChildByType<NineSlice>(0)) {
+            auto from = bg->convertToWorldSpace({0.f, 0.f});
+            auto to = bg->convertToWorldSpace({bg->getContentWidth(), bg->getContentHeight()});
+            log::info("Smoke test: notice box x {:.0f} to {:.0f} of a screen {:.0f} wide", from.x, to.x,
+                CCDirector::get()->getWinSize().width);
+        }
         for (auto label : labels) {
             auto size = label->getScaledContentSize();
             log::info("Smoke test: notice label \"{}\" font {} visible {} opacity {} displayed {} size {:.1f}x{:.1f}",
@@ -1147,7 +1179,8 @@ void smokeUI(int stage) {
     };
     switch (stage) {
         case 0:
-            notify("Notice test: SP 1/2 (11.2%)", NotificationIcon::Info);
+            // The longest kind: it has to fit the screen.
+            notify(NotificationIcon::Warning, Msg::SPsWithoutLowDetail);
             return next(0.5f);
         case 1:
             describeNotice();
@@ -1159,6 +1192,8 @@ void smokeUI(int stage) {
                 pl->resetLevel();
             }
             notify(NotificationIcon::Success, Msg::Placed, labelOf(sps.empty() ? nullptr : sps.front()));
+            // In the mod's own label too.
+            notify("Твои SP здесь — без Low Detail Mode: выключи его, и ещё длиннее, чем бывает", NotificationIcon::Warning);
             return next(0.5f);
         case 2:
             describeNotice();
@@ -1181,6 +1216,7 @@ void smokeUI(int stage) {
             return next();
         case 4:
             captureScreen("smoke-list.png");
+            if (g_smoke.dialogs) return smokeUI(20);
             if (!sps.empty()) splist::openRename(sps.front());
             return next();
         case 5: {
@@ -1211,6 +1247,47 @@ void smokeUI(int stage) {
         case 8:
             captureScreen("smoke-import.png");
             return finishSmokeTest();
+        // The file dialogs through the buttons, as a player goes: export the SPs, then import that file (all
+        // of it already here). tools/answer_dialogs.ps1 fills the dialogs in, from outside the game.
+        case 20:
+            pressButton("export-button"_spr);
+            return next();
+        case 21:
+            g_lastNotice.clear();
+            pressButton("export-picked-button"_spr);
+            g_smoke.waitFrom = CCDirector::get()->getTotalFrames();
+            return smokeUI(22);
+        case 22:
+        case 24: {
+            // The game goes on while the dialog is open: frames keep coming.
+            bool done = g_lastNotice == (stage == 22 ? text::format(Msg::Exported, sps.size()) : std::string(text::tr(Msg::AllAlreadyHere)));
+            if (!done && ++g_smoke.waits < 120) {
+                CCScene::get()->runAction(CCSequence::create(CCDelayTime::create(0.25f),
+                    CallFuncExt::create([stage] { smokeUI(stage); }), nullptr));
+                return;
+            }
+            log::info("Smoke test: dialog {}: {} after {} frames, notice \"{}\"", stage == 22 ? "export" : "import",
+                done ? "done" : "timed out", CCDirector::get()->getTotalFrames() - g_smoke.waitFrom, g_lastNotice);
+            g_smoke.waits = 0;
+            if (stage == 24) {
+                int open = 0;
+                for (auto child : CCArrayExt<CCNode*>(CCScene::get()->getChildren())) {
+                    open += typeinfo_cast<FLAlertLayer*>(child) != nullptr;
+                }
+                log::info("Smoke test: after the import: {} popups open, SP list {}, {} SPs", open,
+                    CCScene::get()->getChildByIDRecursive("import-button"_spr) ? "there" : "gone", sps.size());
+                captureScreen("smoke-dialog.png");
+                return finishSmokeTest();
+            }
+            return next();
+        }
+        case 23:
+            g_lastNotice.clear();
+            pressButton("import-button"_spr);
+            // A second press while the dialog is open opens no other.
+            pressButton("import-button"_spr);
+            g_smoke.waitFrom = CCDirector::get()->getTotalFrames();
+            return smokeUI(24);
     }
 }
 
@@ -1396,6 +1473,10 @@ void rename(SP const& sp, std::string name) {
     storage::saveNames(g_session.sps);
 }
 
+int session() {
+    return PlayLayer::get() ? g_sessionCount : 0;
+}
+
 void notify(NotificationIcon icon, std::string const& text) {
     ::notify(text, icon);
 }
@@ -1526,6 +1607,7 @@ class $modify(SPCBaseLayer, GJBaseGameLayer) {
 class $modify(SPCPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         g_session = Session{};
+        g_sessionCount++;
         g_rec = Recording{};
         g_play = Playback{};
         g_stats = Stats{};
