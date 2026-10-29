@@ -1646,13 +1646,22 @@ void nextAction() {
     // Frames takes them from raw input): "jump" presses, "jump:up" lets go.
     if (op == "jump") {
         bool down = rest != "up";
+        bool before = g_rec.holds[1];
         pl->handleButton(down, 1, true);
-        log::info("Smoke test: jump {}: auto part {}, jump held {}", down ? "pressed" : "let go",
-            g_play.sp && g_play.controlling ? "goes on" : "off", g_rec.holds[1]);
+        log::info("Smoke test: jump {} at x {:.1f}: auto part {}, jump held {} -> {}", down ? "pressed" : "let go",
+            pl->m_player1->m_position.x, g_play.sp && g_play.controlling ? "goes on" : "off", before, g_rec.holds[1]);
         return afterFrames(1, nextAction);
     }
-    if (op == "from") {
+    if (op == "from" || op == "fromx") {
         size_t i = static_cast<size_t>(arg(0, 0));
+        // fromx: the SP nearest to that x (indices move as SPs come and go).
+        if (op == "fromx") {
+            float x = utils::numFromString<float>(rest).unwrapOr(0.f);
+            i = 0;
+            for (size_t k = 1; k < sps.size(); k++) {
+                if (std::abs(sps[k]->x - x) < std::abs(sps[i]->x - x)) i = k;
+            }
+        }
         if (i >= sps.size()) {
             log::warn("Smoke test: no SP {}", i);
             return next();
