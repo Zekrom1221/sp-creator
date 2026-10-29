@@ -470,9 +470,13 @@ void playStep(PlayLayer* pl) {
         auto const& f = sp.frames[k];
         trackDiff(now, sp.frames, k, pb.autoX, pb.autoY, pb.autoCam);
         if (k == 0) holdAgain(pl, sp);
-        // Back on the recorded path every step, in case the replay drifts.
-        forcePlayer(pl->m_player1, f.p1);
-        if (f.dual && pl->m_player2) forcePlayer(pl->m_player2, f.p2);
+        // Back on the recorded path every step, in case the replay drifts. Not to a frame recorded before the game
+        // had moved the player on (its x is the frame before's; see trackDiff): that would put the player a step
+        // back, and the next frame a step on again, a jolt a wave shows.
+        if (k == 0 || sp.frames[k - 1].x != f.x) {
+            forcePlayer(pl->m_player1, f.p1);
+            if (f.dual && pl->m_player2) forcePlayer(pl->m_player2, f.p2);
+        }
         while (pb.nextInput < sp.inputs.size() && sp.inputs[pb.nextInput].step <= k) {
             auto const& in = sp.inputs[pb.nextInput++];
             inject(pl, holdIndex(in.button, in.p1), in.down);
@@ -847,10 +851,14 @@ class $modify(SPCBaseLayer, GJBaseGameLayer) {
             // Unless control isn't blocked: then the first press ends the auto part and goes in. From inside this
             // hook a handleButton call goes to the hooks after this one, so the buttons are recorded here.
             if (down && !blockInput()) {
+                bool held = g_play.gameHolds[index];
                 endAutoPart(PlayLayer::get(), true, [this](int i, bool down) {
                     bool p1 = i <= 3;
                     this->press(down, p1 ? i : i - 3, p1);
                 });
+                // The auto part held this button already: the click is still a press (a jump, an orb), which
+                // the game takes from a held button too.
+                if (held) this->press(true, button, isPlayer1);
             }
             return;
         }
@@ -953,11 +961,16 @@ class $modify(SPCPlayLayer, PlayLayer) {
         // The anticheat spike is a fake death at the level start.
         if (object != m_anticheatSpike) {
             g_rec.hits++;
-            if (g_play.sp && g_play.controlling && !smoke::running()) {
-                // Another mod's noclip may still save the player after this.
-                log::warn("SP {}: hit object {} at {:.1f},{:.1f} in the auto part, step {} of {}", g_play.sp->id,
-                    object ? object->m_objectID : 0, object ? object->getPositionX() : 0.f,
-                    object ? object->getPositionY() : 0.f, g_play.step, g_play.sp->handoff());
+            if (g_play.sp && g_play.controlling) {
+                // No death in the auto part: it replays a run that got through there, so a hit comes from what
+                // loading the checkpoint doesn't put back at once (in BPATA a spike a trigger moves stands where
+                // the level has it for a step, and moves on by a different amount each attempt).
+                if (g_rec.hits <= 3) {
+                    log::warn("SP {}: hit object {} at {:.1f},{:.1f} in the auto part, step {} of {}: no death", g_play.sp->id,
+                        object ? object->m_objectID : 0, object ? object->getPositionX() : 0.f,
+                        object ? object->getPositionY() : 0.f, g_play.step, g_play.sp->handoff());
+                }
+                return;
             }
             if (smoke::hit(this, player, object)) return;
         }

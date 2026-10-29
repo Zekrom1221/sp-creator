@@ -2,6 +2,7 @@
 
 Place your own startpos (SP) in any level while you play. Starting from it replays a short auto part
 (0.6 s by default) before you take control, so you enter the hard part at full speed and with the right camera.
+The auto part plays back your own run, and you can't die in it.
 
 Attempts from your startpos count in the attempt counter, like attempts from any startpos, but they don't save
 a new best or a completion.

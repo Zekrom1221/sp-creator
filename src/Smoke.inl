@@ -1875,10 +1875,6 @@ void smokeStep(PlayLayer* pl) {
 
 namespace smoke {
 
-bool running() {
-    return g_smoke.active;
-}
-
 bool takesOver() {
     return g_smokeTakeover;
 }

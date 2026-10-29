@@ -8,7 +8,8 @@ A [Geode](https://geode-sdk.org) mod for Geometry Dash 2.2081 (Windows).
 
 Place your own startpos (SP) in any level while you play: online levels, main levels and your own. Starting
 from it replays a short auto part (0.6 s by default) before you take control, so you enter the hard part at
-full speed and with the right camera, the way you'd get there from the level start.
+full speed and with the right camera, the way you'd get there from the level start. The auto part plays back your
+own run, and you can't die in it.
 
 Attempts from your SPs count in the attempt counter, like attempts from any startpos, but they don't save a new
 best or a completion.

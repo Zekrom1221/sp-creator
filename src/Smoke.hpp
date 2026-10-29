@@ -13,7 +13,6 @@ namespace smoke {
 
 #ifdef SPC_SMOKE
 
-bool running();
 bool takesOver();     // a press ends the auto part whatever the setting says
 bool keepsPlaying();  // the game doesn't pause when its window goes to the background
 void noticed(std::string const& text);
@@ -27,7 +26,6 @@ void quitting();
 
 #else
 
-inline bool running() { return false; }
 inline bool takesOver() { return false; }
 inline bool keepsPlaying() { return false; }
 inline void noticed(std::string const&) {}
