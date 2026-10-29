@@ -104,6 +104,10 @@ struct SmokeTest {
     std::string handoffMode;
     std::vector<std::function<void()>> restores;  // settings changed by "setting", put back at the end
     int referenceLevel = 0;       // the level the reference run is of: other levels get blind jumps
+    // Blind jumps miss most portals: with "steer_portals" the player is put at a portal's height just before
+    // it (outside auto parts), so every mode of the level comes up.
+    bool steer = false;
+    std::vector<CCPoint> portals;  // by x
 };
 
 constexpr int EXTERNAL_KEY_STEPS = 600;
@@ -374,6 +378,7 @@ void startSmokeTest() {
         if (auto s = step.asString(); s.isOk()) g_smoke.actions.push_back(s.unwrap());
     }
     g_smoke.scripted = !g_smoke.actions.empty();
+    g_smoke.steer = root["steer_portals"].asBool().unwrapOr(false);
     if (root.contains("update")) smokeUpdate(level, root["update"]);
     if (g_smoke.placeAtX.empty() && !g_smoke.scripted) g_smoke.stepsLeft = 60;
     log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}, {} steps, "
@@ -1758,6 +1763,16 @@ void smokeStep(PlayLayer* pl) {
         bool hold = run % 120 < 30;
         if (g_play.sp && g_play.controlling) g_play.userHolds[1] = hold;
         else if (hold != g_rec.holds[1]) pl->handleButton(hold, 1, true);
+        if (t.steer && !(g_play.sp && g_play.controlling)) {
+            auto p = pl->m_player1;
+            float x = p->m_position.x;
+            auto it = std::lower_bound(t.portals.begin(), t.portals.end(), x - 5.f, [](CCPoint const& a, float x) { return a.x < x; });
+            if (it != t.portals.end() && it->x - x < 45.f) {
+                p->m_position.y = it->y;
+                p->setPositionY(it->y);
+                p->m_yVelocity = 0;
+            }
+        }
     }
     if (g_play.sp && g_play.controlling && g_play.step == g_play.sp->handoff()) {
         t.handoffX = pl->m_player1->m_position.x;
@@ -1855,6 +1870,17 @@ void ready(PlayLayer* pl) {
     auto& t = g_smoke;
     if (!t.active) return;
     if (t.scripted) {
+        if (t.steer) {
+            // Mode, gravity, size, dual, mirror, speed portals and teleports.
+            static std::set<int> const ids = {12, 13, 47, 111, 660, 745, 1331, 1933, 10, 11, 2926, 99, 101, 286, 287, 45, 46,
+                200, 201, 202, 203, 1334, 747};
+            t.portals.clear();
+            for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+                if (ids.contains(obj->m_objectID)) t.portals.push_back(obj->m_startPosition);
+            }
+            std::sort(t.portals.begin(), t.portals.end(), [](CCPoint const& a, CCPoint const& b) { return a.x < b.x; });
+            log::info("Smoke test: steering into {} portals", t.portals.size());
+        }
         // The first step a second in, or the next one once in the level again.
         bool again = std::exchange(t.reentering, false);
         if (!t.started || again) {
