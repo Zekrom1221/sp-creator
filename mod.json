@@ -3,11 +3,18 @@
     "gd": {
         "win": "2.2081"
     },
-    "version": "0.1.0",
+    "version": "0.9.0",
     "id": "zekrom.sp-creator",
     "name": "SP Creator",
     "developer": "Zekrom",
-    "description": "Place your own startpos in any online level, with a short auto part before you take control",
+    "description": "Place your own startpos in any level, with a short auto part before you take control",
+    "links": {
+        "source": "https://github.com/Zekrom1221/sp-creator"
+    },
+    "issues": {
+        "info": "Report bugs and share ideas on GitHub",
+        "url": "https://github.com/Zekrom1221/sp-creator/issues"
+    },
     "dependencies": {
         "sabe.persistenceapi": ">=v1.2.0",
         "geode.node-ids": ">=v1.23.0"
@@ -82,20 +89,6 @@
             "default": true,
             "name": "Block control in the auto part",
             "description": "On: your clicks in the auto part are ignored until it ends. Off: your first click ends the auto part and you play from there."
-        },
-        "checkpoint-interval": {
-            "type": "int",
-            "default": 24,
-            "min": 4,
-            "max": 120,
-            "name": "Checkpoint interval",
-            "description": "Physics steps (240 per second) between hidden checkpoints. Lower: the auto part is closer to its set length. Higher: less work while you play."
-        },
-        "guide-player": {
-            "type": "bool",
-            "default": true,
-            "name": "Guide the auto part",
-            "description": "Put the player back on the recorded path every step of the auto part, in case the replay drifts"
         }
     }
 }

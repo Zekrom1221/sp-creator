@@ -22,11 +22,7 @@ struct Frame {
     bool dual = false;
     // Only compared with, never forced (the camera of the first frame is put back after loading).
     float camX = 0, camY = 0;
-    // Debug only, not saved.
-    float speed = 0;
-    double time = 0;
-    double probeY = 0;  // height of the first object of the smoke test's probe group
-    int hits = 0;       // destroyPlayer calls so far in the attempt (several per death; noclip goes on)
+    int hits = 0;  // destroyPlayer calls so far in the attempt (several per death; noclip goes on): not saved
 };
 
 struct Input {

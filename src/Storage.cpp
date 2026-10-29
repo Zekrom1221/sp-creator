@@ -623,13 +623,17 @@ struct Remap {
     unsigned int objects = 0;                   // the level's objects in it (not the mod's own after them)
     int standIns = 0;                           // references to stand-ins
     int outside = 0;                            // references past the level's objects
+#ifdef SPC_SMOKE
     std::vector<unsigned int>* seen = nullptr;  // smoke test: every index asked for
+#endif
 } g_remap;
 
 CCObject* remapObjectAtIndex(CCArray* self, unsigned int index) {
     // Called from the hook, this goes on to the game's own.
     if (self != g_remap.array) return self->objectAtIndex(index);
+#ifdef SPC_SMOKE
     if (g_remap.seen) g_remap.seen->push_back(index);
+#endif
     if (index >= g_remap.objects) {
         g_remap.outside++;
         // Something to read into: the SP doesn't get used.
@@ -942,9 +946,11 @@ bool isVersionOfLevel(std::filesystem::path const& dir) {
 
 namespace storage {
 
+#ifdef SPC_SMOKE
 void setRoot(std::string_view utf8) {
     g_root = utils::string::utf8ToWide(utf8);
 }
+#endif
 
 void beforeCreatingObjects() {
     *reinterpret_cast<int*>(geode::base::get() + UNIQUE_ID_COUNTER) = FIRST_OBJECT_ID;
@@ -1401,6 +1407,7 @@ Result<MovedVersion> moveVersion(Version const& version) {
     return Ok(std::move(out));
 }
 
+#ifdef SPC_SMOKE
 std::vector<References> referencesOfSPs() {
     std::vector<References> out;
     auto pl = PlayLayer::get();
@@ -1438,6 +1445,7 @@ std::vector<References> referencesOfSPs() {
     }
     return out;
 }
+#endif
 
 Result<std::vector<VersionSP>> readVersion(Version const& version) {
     if (!isVersionOfLevel(version.dir)) return Err("not a version of this level");
@@ -1496,6 +1504,7 @@ bool renameVersion(Version const& version, std::string const& name) {
     return res.isOk();
 }
 
+#ifdef SPC_SMOKE
 void removeAll() {
     if (g_level.dir.empty()) return;
     std::error_code ec;
@@ -1504,6 +1513,7 @@ void removeAll() {
     log::info("Removed {} and its versions ({})", g_level.dir, ec ? ec.message() : "ok");
     g_level = {};
 }
+#endif
 
 namespace {
 

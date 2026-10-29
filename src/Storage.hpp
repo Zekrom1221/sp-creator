@@ -41,8 +41,10 @@ namespace storage {
         std::vector<float> notMoved;
     };
 
+#ifdef SPC_SMOKE
     // Folder under the mod save dir (UTF-8, "levels"); the smoke test keeps its SPs apart.
     void setRoot(std::string_view utf8);
+#endif
     // Right before the level creates its objects (see Storage.cpp).
     void beforeCreatingObjects();
     // Once the level has created its objects.
@@ -55,8 +57,10 @@ namespace storage {
     void saveNames(std::vector<std::shared_ptr<StartPoint>> const& sps);
     // False if its file couldn't be deleted (in the log).
     bool remove(StartPoint const& sp);
+#ifdef SPC_SMOKE
     // Smoke test: deletes the level's SP folder and its versions.
     void removeAll();
+#endif
     // The level is left: its folder goes if nothing is kept for it, no SPs and no versions (with versions,
     // their "for an older level version" comes from its level.json). Versions without SPs go too.
     void leave();
@@ -121,6 +125,7 @@ namespace storage {
     // A version for another level version (`movable`): its SPs read with the objects they refer to found
     // among the open version's, by the prints saved with them.
     geode::Result<MovedVersion> moveVersion(Version const& version);
+#ifdef SPC_SMOKE
     // Smoke test: the objects (indices in m_objects) the checkpoint of each SP of the open level refers to.
     struct References {
         int id = 0;
@@ -128,6 +133,7 @@ namespace storage {
         std::vector<unsigned int> states;  // those with an object state (moved, used, animated) among them
     };
     std::vector<References> referencesOfSPs();
+#endif
     bool removeVersion(Version const& version);
     // An empty name takes the version's name away.
     bool renameVersion(Version const& version, std::string const& name);

@@ -1,6 +1,6 @@
 # SP Creator
 
-Place your own startpos (SP) in any online level while you play. Starting from it replays a short auto part
+Place your own startpos (SP) in any level while you play. Starting from it replays a short auto part
 (0.6 s by default) before you take control, so you enter the hard part at full speed and with the right camera.
 
 Attempts from your startpos count in the attempt counter, like attempts from any startpos, but they don't save
@@ -12,6 +12,9 @@ a new best or a completion.
 - <cy>,</c> and <cy>.</c>: previous / next SP (or the level start)
 - <cy>Delete</c>: delete the SP you start from
 - The <cg>SP</c> button in the pause menu lists your SPs: play, rename, delete
+
+The keys, the auto part length, whether your clicks in the auto part count and the language are in the mod's
+settings.
 
 ## Sharing SPs
 
@@ -40,4 +43,6 @@ or SPs and versions of one level, and delete them to free up space.
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with
   <cy>Bind profile</c> on: editing a profile keeps its old startposes.
 
-*Work in progress.*
+## Beta
+
+This is a beta. Found a bug, or have an idea? Tell about it on [GitHub](https://github.com/Zekrom1221/sp-creator/issues).

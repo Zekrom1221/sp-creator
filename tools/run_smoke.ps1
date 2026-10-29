@@ -1,5 +1,6 @@
 # Runs a smoke test (smoketest.json in the mod save dir) without Geometry Dash taking the screen, so the
-# PC can be used meanwhile; the window can still be opened to watch, and minimized again.
+# PC can be used meanwhile; the window can still be opened to watch, and minimized again. The mod installed
+# has to be a build with the test in (build.bat smoke): a release build leaves smoketest.json alone.
 #   pwsh tools/run_smoke.ps1 -Config '{"level": 109947627, ...}'
 #
 # While the game loads, its window is moved off the screen: minimized then, the game would load very slowly
