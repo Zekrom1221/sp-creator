@@ -617,7 +617,9 @@ void smokeTransfer() {
     if (!level || list.empty()) return log::error("Smoke test: no version");
     // The last one deleted: the version brings it back.
     if (g_session.sps.size() == 3) {
-        removeSP(PlayLayer::get(), g_session.sps.back());
+        // A copy: removing takes the SP out of the vector the reference would point into.
+        auto last = g_session.sps.back();
+        removeSP(PlayLayer::get(), last);
         auto version = transfer::openVersion(list.front());
         if (version.isErr()) return log::error("Smoke test: the version refused: {}", version.unwrapErr());
         auto const& items = version.unwrap().items;
@@ -1749,7 +1751,11 @@ void nextAction() {
     }
     if (op == "delete_list") {
         size_t i = static_cast<size_t>(arg(0, 0));
-        if (i < sps.size()) core::remove(sps[i]);
+        // A copy, as the list's button has: core::remove takes the SP out of the vector `sps` is.
+        if (i < sps.size()) {
+            auto sp = sps[i];
+            core::remove(sp);
+        }
         return next();
     }
     if (op == "rename") {
