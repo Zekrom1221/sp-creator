@@ -1736,6 +1736,12 @@ void nextAction() {
         t.ui = t.uiDone = true;
         return smokeUI(0);
     }
+    // "Add" of the SPs of a file that aren't here yet, as import_from does.
+    if (op == "import") {
+        t.importFrom = rest;
+        smokeImport();
+        return next();
+    }
     if (op == "transfer") {
         if (t.exportTo.empty()) t.exportTo = "smoke-qa-export.spcreator";
         if (!sps.empty()) smokeTransfer();
