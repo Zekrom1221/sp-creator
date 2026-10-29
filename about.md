@@ -12,7 +12,7 @@ a new best or a completion.
 - <cy>V</c>: place an SP where you are
 - <cy>,</c> and <cy>.</c>: previous / next SP (or the level start)
 - <cy>Delete</c>: delete the SP you start from
-- The <cg>SP</c> button in the pause menu lists your SPs: play, rename, delete
+- The <cg>SP</c> button in the pause menu lists your SPs: play, rename, delete one or several
 
 The keys, the auto part length, whether your clicks in the auto part count and the language are in the mod's
 settings.

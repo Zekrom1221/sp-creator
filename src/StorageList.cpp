@@ -22,7 +22,7 @@ namespace {
 using namespace ui;
 
 std::string reason(storage::Version const& v) {
-    return str(v.replaced ? Msg::VersionReplaced : Msg::VersionOld);
+    return versionReason(v.why);
 }
 
 // What both lists have: rows with a checkbox, nothing picked to begin with, rebuilt (once on top) after

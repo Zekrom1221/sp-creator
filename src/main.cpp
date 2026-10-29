@@ -728,6 +728,33 @@ void remove(SP const& sp) {
     if (auto pl = PlayLayer::get()) removeSP(pl, sp);
 }
 
+RemoveResult remove(std::vector<SP> const& sps, bool save) {
+    RemoveResult out;
+    auto pl = PlayLayer::get();
+    if (!pl || sps.empty()) return out;
+    std::vector<SP> gone;
+    if (save) {
+        // Setting aside moves the files: they have to be written.
+        saveUnsaved();
+        auto aside = storage::setAside(sps, storage::AsideFor::Delete);
+        gone = std::move(aside.moved);
+        out.saved = !gone.empty();
+        out.existing = out.saved && aside.existing;
+    }
+    else {
+        for (auto const& sp : sps) {
+            if (storage::remove(*sp)) gone.push_back(sp);
+        }
+    }
+    for (auto const& sp : gone) dropSP(pl, sp);
+    storage::saveNames(g_session.sps);
+    out.removed = static_cast<int>(gone.size());
+    out.left = static_cast<int>(sps.size() - gone.size());
+    log::info("Deleted {} of {} SPs ({}): {} in the level", out.removed, sps.size(), save ? "set aside" : "deleted",
+        g_session.sps.size());
+    return out;
+}
+
 void rename(SP const& sp, std::string name) {
     sp->name = std::move(name);
     storage::saveNames(g_session.sps);
@@ -766,7 +793,7 @@ ImportResult import(std::vector<Incoming> const& files, Replace replace) {
         auto own = s.sps;
         std::vector<SP> gone;
         if (replace == Replace::SaveVersion) {
-            auto aside = storage::setAside(own);
+            auto aside = storage::setAside(own, storage::AsideFor::Replace);
             gone = std::move(aside.moved);
             out.saved = !gone.empty();
             out.existing = out.saved && aside.existing;

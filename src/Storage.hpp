@@ -89,20 +89,23 @@ namespace storage {
     // SP files (passed through readHeader) loaded and saved under ids from `nextId` on: an SP per file,
     // null where it didn't work (in the log). Reads the checkpoints, which PersistenceAPI doesn't check.
     std::vector<std::shared_ptr<StartPoint>> add(std::vector<geode::ByteSpan> const& files, int& nextId);
+    // What put SPs into a version: "Replace all" or deleting them (setAside), or load() for another version
+    // of the level.
+    enum class AsideFor { Replace, Delete, OtherLevelVersion };
     struct Aside {
         std::vector<std::shared_ptr<StartPoint>> moved;  // out of the level's folder: in a version now
         bool existing = false;  // a version had them already, and is the newest now
     };
     // Moves the files of SPs of the level into a folder of their own (with their names), a version of
-    // them, out of the way of imported ones. If a version that fits holds just these SPs already, byte for
-    // byte and with the same names, their files are deleted instead, and that version becomes the newest.
-    Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps);
+    // them, out of the way of imported ones or of the player. If a version that fits holds just these SPs
+    // already, byte for byte and with the same names, their files are deleted instead, and that version
+    // becomes the newest.
+    Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps, AsideFor why);
 
-    // SPs set aside in a folder next to the level's: by "Replace all" (setAside), or by load() for another
-    // version of the level. Kept until the player deletes them.
+    // SPs set aside in a folder next to the level's. Kept until the player deletes them.
     struct Version {
         std::filesystem::path dir;
-        bool replaced = false;  // by "Replace all"; otherwise for another level version
+        AsideFor why = AsideFor::OtherLevelVersion;
         std::time_t time = 0;
         int sps = 0;
         uintmax_t bytes = 0;    // all its files

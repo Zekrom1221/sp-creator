@@ -19,6 +19,8 @@
 #include <sabe.persistenceapi/include/hooks/cocos2d/CCNode.hpp>
 #include <sabe.persistenceapi/include/util/Stream.hpp>
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -861,8 +863,13 @@ bool hasSPFiles(std::filesystem::path const& dir) {
 }
 
 // A name no folder has yet for SPs set aside: "-old" ones were made for another level version,
-// "-replaced" ones gave way to imported SPs.
-constexpr std::string_view OLD = "old", REPLACED = "replaced";
+// "-replaced" ones gave way to imported SPs, "-deleted" ones the player deleted.
+constexpr std::string_view OLD = "old", REPLACED = "replaced", DELETED = "deleted";
+constexpr std::array<std::pair<std::string_view, storage::AsideFor>, 3> ASIDE_KINDS = {{
+    {OLD, storage::AsideFor::OtherLevelVersion},
+    {REPLACED, storage::AsideFor::Replace},
+    {DELETED, storage::AsideFor::Delete},
+}};
 
 std::filesystem::path asideName(std::filesystem::path const& dir, std::string_view why) {
     std::error_code ec;
@@ -884,7 +891,7 @@ std::string nameOf(std::filesystem::path const& path) {
 // The level key of a version folder's name ("online-1-replaced-1700000000-2": "online-1"), "" if it isn't one.
 std::string versionKeyOf(std::string const& name) {
     auto digits = [](std::string_view s) { return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; }); };
-    for (auto why : {OLD, REPLACED}) {
+    for (auto [why, _] : ASIDE_KINDS) {
         auto mark = fmt::format("-{}-", why);
         auto at = name.rfind(mark);
         if (at == std::string::npos || at == 0) continue;
@@ -909,10 +916,10 @@ std::vector<storage::Version> versionsOf(std::filesystem::path const& dir, matjs
         auto name = nameOf(it->path());
         storage::Version v;
         size_t timeAt = 0;
-        for (auto why : {OLD, REPLACED}) {
+        for (auto [why, kind] : ASIDE_KINDS) {
             auto prefix = fmt::format("{}-{}-", key, why);
             if (name.starts_with(prefix)) {
-                v.replaced = why == REPLACED;
+                v.why = kind;
                 timeAt = prefix.size();
             }
         }
@@ -950,7 +957,7 @@ std::vector<storage::Version> versionsOf(std::filesystem::path const& dir, matjs
 bool isVersionOfLevel(std::filesystem::path const& dir) {
     if (g_level.dir.empty() || dir.parent_path() != g_level.dir.parent_path()) return false;
     auto name = nameOf(dir);
-    for (auto why : {OLD, REPLACED}) {
+    for (auto [why, _] : ASIDE_KINDS) {
         if (name.starts_with(fmt::format("{}-{}-", g_level.key, why))) return true;
     }
     return false;
@@ -1328,15 +1335,16 @@ std::optional<Version> sameVersion(std::vector<std::shared_ptr<StartPoint>> cons
     return std::nullopt;
 }
 
-Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps) {
+Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps, AsideFor why) {
     Aside out;
     auto& moved = out.moved;
     if (g_level.dir.empty() || sps.empty()) return out;
+    auto mark = std::find_if(ASIDE_KINDS.begin(), ASIDE_KINDS.end(), [why](auto const& k) { return k.second == why; })->first;
     std::error_code ec;
     if (auto same = sameVersion(sps)) {
-        // Renamed as if made now (as one before "Replace all", whatever it was): the newest, where the
-        // player looks for the SPs that just went. Not renamed, it's a copy of them all the same.
-        auto newest = asideName(g_level.dir, REPLACED);
+        // Renamed as if made now (as one before what sets them aside now, whatever it was): the newest, where
+        // the player looks for the SPs that just went. Not renamed, it's a copy of them all the same.
+        auto newest = asideName(g_level.dir, mark);
         std::filesystem::rename(same->dir, newest, ec);
         log::info("SPs of {} are in {} already: it's {} now ({})", g_level.key, same->dir, newest, ec ? ec.message() : "ok");
         out.existing = !ec;
@@ -1350,7 +1358,7 @@ Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps) {
         }
         return out;
     }
-    auto aside = asideName(g_level.dir, REPLACED);
+    auto aside = asideName(g_level.dir, mark);
     std::filesystem::create_directories(aside, ec);
     if (ec) {
         log::error("Can't create {}: {}", aside, ec.message());

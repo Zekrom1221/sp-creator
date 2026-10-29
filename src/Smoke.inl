@@ -517,6 +517,16 @@ void restoreSmokeLevel() {
     t.lowDetailWas.reset();
 }
 
+// What made a version, for the log.
+char const* asideKind(storage::AsideFor why) {
+    switch (why) {
+        case storage::AsideFor::Replace: return "replaced";
+        case storage::AsideFor::Delete: return "deleted";
+        case storage::AsideFor::OtherLevelVersion: break;
+    }
+    return "old";
+}
+
 // Export and import: the SPs go to a file, which is checked against the level, then variants of it that
 // must be refused (another level, mode, game or level version; damaged), then the file replaces the
 // SPs (forced: they're the same SPs), and the next attempts start from the imported ones.
@@ -601,7 +611,7 @@ void smokeTransfer() {
         std::vector<std::string> list;
         for (auto const& v : storage::versions()) {
             list.push_back(fmt::format("{}{}: {} SPs, {} KB, {}{}", utils::string::pathToString(v.dir.filename()),
-                v.name.empty() ? "" : fmt::format(" \"{}\"", v.name), v.sps, v.bytes / 1024, v.replaced ? "replaced" : "old",
+                v.name.empty() ? "" : fmt::format(" \"{}\"", v.name), v.sps, v.bytes / 1024, asideKind(v.why),
                 v.fits ? "" : ", doesn't fit"));
         }
         return fmt::format("{} [{}]", list.size(), fmt::join(list, "; "));
@@ -1545,6 +1555,68 @@ void smokeKeys(enumKeyCodes key, int left, int gap) {
     afterFrames(gap, [=] { smokeKeys(key, left, gap); });
 }
 
+// Deleting several SPs through the SP list's buttons: `picks` "all" (Select all), "all2" (it twice: none),
+// "none", or row indices ("0,2"); then saved first ("save") or not.
+void smokeDeleteUI(int stage, std::string picks, bool save) {
+    auto pl = PlayLayer::get();
+    if (!pl) return finishSmokeTest();
+    auto next = [=](int frames) { afterFrames(frames, [=] { smokeDeleteUI(stage + 1, picks, save); }); };
+    switch (stage) {
+        case 0:
+            g_smoke.pausing = true;
+            pl->pauseGame(false);
+            g_smoke.pausing = false;
+            return next(20);
+        case 1:
+            if (auto pause = CCScene::get()->getChildByType<PauseLayer>(0)) splist::open(pause);
+            else log::error("Smoke test: no pause menu");
+            return next(30);
+        case 2:
+            captureScreen("smoke-delete-list.png");
+            pressButton("delete-button"_spr);
+            return next(30);
+        case 3:
+            if (picks == "all" || picks == "all2") pressButton("delete-select-all-button"_spr);
+            if (picks == "all2") pressButton("delete-select-all-button"_spr);
+            if (picks != "all" && picks != "all2" && picks != "none") {
+                for (auto const& i : utils::string::split(picks, ",")) {
+                    pressToggle(fmt::format("{}/pick-{}", Mod::get()->getID(), i));
+                }
+            }
+            return next(10);
+        case 4:
+            logTouchPriorities("delete list");
+            captureScreen("smoke-delete.png");
+            g_lastNotice.clear();
+            pressButton("delete-picked-button"_spr);
+            return next(30);
+        case 5:
+            if (!g_lastNotice.empty()) {
+                // Nothing picked: no question, the list stays.
+                log::info("Smoke test: DELETE {}: notice \"{}\", {} SPs", picks, g_lastNotice, g_session.sps.size());
+                return smokeUIDone();
+            }
+            logTouchPriorities("save first");
+            captureScreen("smoke-delete-confirm.png");
+            pressButton(save ? "save-and-delete-button"_spr : "delete-only-button"_spr);
+            return next(30);
+        case 6: {
+            std::vector<std::string> versions;
+            for (auto const& v : storage::versions()) versions.push_back(fmt::format("{} SPs {}", v.sps, asideKind(v.why)));
+            log::info("Smoke test: DELETE {} {}: notice \"{}\", {} SPs left, active {}, versions [{}]", picks,
+                save ? "saved" : "deleted", g_lastNotice, g_session.sps.size(), labelOf(g_session.active),
+                fmt::join(versions, "; "));
+            captureScreen("smoke-delete-end.png");
+            pressButton("versions-button"_spr);
+            return next(30);
+        }
+        case 7:
+            // What the versions say they were made by.
+            captureScreen("smoke-delete-versions.png");
+            return smokeUIDone();
+    }
+}
+
 void smokeSetting(std::string const& key, std::string const& value) {
     auto mod = Mod::get();
     auto& restores = g_smoke.restores;
@@ -1757,6 +1829,9 @@ void nextAction() {
             core::remove(sp);
         }
         return next();
+    }
+    if (op == "delete_ui") {
+        return smokeDeleteUI(0, args.empty() ? "all" : args[0], args.size() > 1 && args[1] == "save");
     }
     if (op == "rename") {
         auto nameAt = rest.find(':');

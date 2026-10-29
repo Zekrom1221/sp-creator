@@ -23,6 +23,14 @@ namespace core {
     void prepareRestart();
     // Deletes the SP without restarting; restarts go to the one before it if they went to it.
     void remove(SP const& sp);
+    struct RemoveResult {
+        int removed = 0;
+        int left = 0;           // couldn't be set aside or deleted: still in the level
+        bool saved = false;     // they went to a version
+        bool existing = false;  // saved: a version had them already (the newest now)
+    };
+    // Deletes these SPs the same way, saved as a version first if `save` (storage::setAside).
+    RemoveResult remove(std::vector<SP> const& sps, bool save);
     void rename(SP const& sp, std::string name);
 
     // Changes with every level entered; 0 out of levels. Tells whether a file dialog came back to the

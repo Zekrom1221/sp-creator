@@ -72,12 +72,23 @@ namespace text {
         ReplaceHint,
         SaveAndReplace,
         DeleteAndReplace,
+        // Deleting picked SPs.
+        Delete,
+        DeleteTitle,
+        DeleteQuestion,   // {count}
+        SaveAndDelete,
+        SPsDeleted,       // {count}
+        SPsDeletedSaved,  // {count}
+        SPsDeletedInVersion, // {count}
+        SPsNotSetAside,   // {deleted} {not set aside}
+        SPsNotDeleted,    // {deleted} {not deleted}
         Versions,
         VersionsTitle,
         VersionsTotal,    // {count} {size}
         VersionsEmpty,
         VersionReplaced,
         VersionOld,
+        VersionBeforeDelete,
         VersionInfo,      // {count} {size}
         VersionDeleteOnly,
         Open,

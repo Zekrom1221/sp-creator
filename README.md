@@ -34,8 +34,9 @@ install it from Geode's mod list.
 | `,` and `.` | Previous / next SP (or the level start) |
 | `Delete` | Delete the SP you start from |
 
-The **SP** button in the pause menu lists your SPs: play from one, rename, delete. The keys, the auto part
-length, whether your clicks in the auto part count, and the language are in the mod's settings.
+The **SP** button in the pause menu lists your SPs: play from one, rename, delete one or several at once. The
+keys, the auto part length, whether your clicks in the auto part count, and the language are in the mod's
+settings.
 
 Only classic levels: platformer levels have no SPs.
 

@@ -2,6 +2,7 @@
 
 #include <Geode/Geode.hpp>
 
+#include "Storage.hpp"
 #include "Text.hpp"
 
 // What the mod's popups share (SPList.cpp, StorageList.cpp).
@@ -16,6 +17,16 @@ namespace ui {
 
     inline std::string str(text::Msg msg) {
         return std::string(text::tr(msg));
+    }
+
+    // What made a version: "before Replace all", "before deleting", "before a level update".
+    inline std::string versionReason(storage::AsideFor why) {
+        switch (why) {
+            case storage::AsideFor::Replace: return str(text::Msg::VersionReplaced);
+            case storage::AsideFor::Delete: return str(text::Msg::VersionBeforeDelete);
+            case storage::AsideFor::OtherLevelVersion: break;
+        }
+        return str(text::Msg::VersionOld);
     }
 
     // Up to MAX_NAME_CHARS letters of `text` (UTF-8), cut between letters: a letter cut off at the end goes.
