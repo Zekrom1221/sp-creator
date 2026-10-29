@@ -418,7 +418,7 @@ CheckpointObject* readCheckpoint(Stream& in) {
     return cp;
 }
 
-// Body: magic, format, level stamp, the SP's own data, the checkpoint. save() then seals it.
+// Body: magic, format, level stamp, the SP's own data, the checkpoint, the presses. save() then seals it.
 void writeSP(Stream& out, StartPoint const& sp) {
     char magic[sizeof(MAGIC)];
     std::memcpy(magic, MAGIC, sizeof(MAGIC));
@@ -455,6 +455,13 @@ void writeSP(Stream& out, StartPoint const& sp) {
         out << in.down;
     }
     writeCheckpoint(out, sp.cp);
+    // After the checkpoint, so that files without it (pressHolds) still read.
+    if (sp.pressHolds) return;
+    for (auto const& p : sp.pressed) {
+        bool jumpBuffered = p.jumpBuffered, ringJump = p.ringJump;
+        out << jumpBuffered;
+        out << ringJump;
+    }
 }
 
 enum class ReadError { None, Damaged, Other };
@@ -558,6 +565,13 @@ std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int 
         return nullptr;
     }
     sp->cp = readCheckpoint(in);
+    sp->pressHolds = bytesRead == bodySize;
+    if (!sp->pressHolds) {
+        for (auto& p : sp->pressed) {
+            in >> p.jumpBuffered;
+            in >> p.ringJump;
+        }
+    }
     if (bytesRead != bodySize) {
         error = fmt::format("the checkpoint read {} bytes, the file holds {}", bytesRead, bodySize);
         return nullptr;

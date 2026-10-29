@@ -53,9 +53,10 @@ namespace transfer {
     // Adds the picked items to the level, or puts them in place of its own SPs.
     core::ImportResult take(Pack const& pack, std::vector<bool> const& picked, core::Replace replace);
 
-    // The system's file dialog, from the Downloads folder: a file to save the SPs of `levelName` to, or to
-    // import from. `then` gets it on the main thread, empty if cancelled. The dialog runs beside the game, as
-    // Geode's own do: with the game stopped, the clicks made in the dialog would reach the game once it
-    // closed. False (and no dialog) while one is open already.
+    // The system's file dialog, from the folder of the file last picked (Downloads at first): a file to save
+    // the SPs of `levelName` to, by a name no file there has yet, or to import from. `then` gets it on the
+    // main thread, empty if cancelled. The dialog runs beside the game, as Geode's own do: with the game
+    // stopped, the clicks made in the dialog would reach the game once it closed. False (and no dialog)
+    // while one is open already.
     bool chooseFile(bool save, std::string const& levelName, geode::Function<void(std::optional<std::filesystem::path>)> then);
 }

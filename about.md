@@ -28,7 +28,8 @@ Open one to bring its SPs back, rename it, or delete the ones you don't need: no
 SPs that a version holds already aren't saved twice: that version moves to the top instead.
 
 When a level is updated, your SPs are moved over to the new version. One that depends on objects the update
-took away stays in <cy>Versions</c> only: the message says where it was, so you can place it again.
+took away stays in <cy>Versions</c> only: the message says where it was, so you can place it again. This is for
+online levels: when you edit your own level, its SPs aren't moved over.
 
 <cy>SP storage</c> in the mod's settings lists the SPs and versions of all levels, the biggest first. Pick levels,
 or SPs and versions of one level, and delete them to free up space.
@@ -42,6 +43,11 @@ or SPs and versions of one level, and delete them to free up space.
   Switcher options.
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with
   <cy>Bind profile</c> on: editing a profile keeps its old startposes.
+
+## Known issues
+
+- Where the gameplay of a level is rotated or goes back, SPs are in the order of where they stand, not of their
+  percent: there the SP list and the <cy>,</c> and <cy>.</c> keys can go back and forth.
 
 ## Beta
 

@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 // wglGetCurrentDC, for the game's window.
@@ -75,8 +76,18 @@ std::filesystem::path defaultFolder() {
     return std::filesystem::is_directory(folder, ec) ? folder : std::filesystem::path();
 }
 
-// "<level name>.spcreator", without the characters Windows doesn't allow in names.
-std::string fileName(std::string const& levelName) {
+// The folder of the file last picked in one of the mod's file dialogs.
+constexpr char const* LAST_FOLDER = "file-folder";
+
+// Where the file dialogs open: the folder of the file last picked, or Downloads.
+std::filesystem::path startFolder() {
+    auto last = Mod::get()->getSavedValue<std::filesystem::path>(LAST_FOLDER);
+    std::error_code ec;
+    return !last.empty() && std::filesystem::is_directory(last, ec) ? last : defaultFolder();
+}
+
+// The level's name, without the characters Windows doesn't allow in names.
+std::string fileStem(std::string const& levelName) {
     std::string name;
     for (unsigned char c : levelName) {
         if (c < 32 || std::string_view("<>:\"/\\|?*").find(static_cast<char>(c)) != std::string_view::npos) name += '_';
@@ -85,7 +96,19 @@ std::string fileName(std::string const& levelName) {
     // Windows drops dots and spaces at the end of a name.
     while (!name.empty() && (name.back() == '.' || name.back() == ' ')) name.pop_back();
     if (name.empty()) name = "SPs";
-    return name + transfer::EXTENSION;
+    return name;
+}
+
+// The name the save dialog offers in `folder`: "<stem>.spcreator", or "<stem> (2).spcreator" and on when
+// that's taken (one level's SPs exported more than once).
+std::wstring freeName(std::filesystem::path const& folder, std::wstring const& stem) {
+    auto extension = utils::string::utf8ToWide(transfer::EXTENSION);
+    auto name = stem + extension;
+    std::error_code ec;
+    for (int n = 2; !folder.empty() && std::filesystem::exists(folder / name, ec); n++) {
+        name = stem + L" (" + std::to_wstring(n) + L")" + extension;
+    }
+    return name;
 }
 
 std::atomic<bool> g_dialogOpen = false;
@@ -109,8 +132,9 @@ std::optional<std::filesystem::path> showDialog(bool save, HWND owner, std::wstr
         dialog->GetOptions(&options);
         dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | (save ? FOS_OVERWRITEPROMPT : FOS_FILEMUSTEXIST));
         IShellItem* item = nullptr;
+        // Always this folder, not the one Windows would pick: the save dialog's name is free in it.
         if (!folder.empty() && SUCCEEDED(SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&item)))) {
-            dialog->SetDefaultFolder(item);
+            dialog->SetFolder(item);
             item->Release();
             item = nullptr;
         }
@@ -164,9 +188,9 @@ transfer::Pack collect(std::vector<ByteVector>& files, std::vector<std::string> 
     auto const& own = core::sps();
     // The level's SPs by content, to see which the file holds; all of them on disk first.
     core::saveAll();
-    std::unordered_set<uint64_t> owned;
+    std::unordered_map<uint64_t, std::string> owned;  // content: name
     for (auto const& sp : own) {
-        if (auto content = storage::contentOf(*sp)) owned.insert(content);
+        if (auto content = storage::contentOf(*sp)) owned.emplace(content, sp->name);
     }
     std::unordered_set<uint64_t> seen;
     transfer::Pack pack;
@@ -192,11 +216,12 @@ transfer::Pack collect(std::vector<ByteVector>& files, std::vector<std::string> 
         }
         pack.items.push_back(std::move(item));
     }
-    // Every SP of the level in the file, and nothing else: taking it would change nothing. (Own SPs whose
-    // content couldn't be read count as not in it.)
+    // Every SP of the level in the file, by the same names, and nothing else: taking it would change nothing.
+    // (Own SPs whose content couldn't be read count as not in it.) Other names: replacing brings them back.
     pack.sameAsLevel = !pack.items.empty() && owned.size() == own.size() &&
-        std::all_of(owned.begin(), owned.end(), [&](uint64_t c) { return seen.contains(c); }) &&
-        std::all_of(pack.items.begin(), pack.items.end(), [](auto const& item) { return item.here; });
+        std::all_of(owned.begin(), owned.end(), [&](auto const& o) { return seen.contains(o.first); }) &&
+        std::all_of(pack.items.begin(), pack.items.end(),
+            [&](auto const& item) { return item.here && item.name == owned.at(item.header.content); });
     std::stable_sort(pack.items.begin(), pack.items.end(), [](auto const& a, auto const& b) { return a.header.x < b.header.x; });
     log::info("Import: {}: {} SPs, {} damaged", from, pack.items.size(), pack.damaged);
     return pack;
@@ -378,8 +403,8 @@ bool chooseFile(bool save, std::string const& levelName, geode::Function<void(st
     // The game's window owns the dialog: it takes no clicks meanwhile (Geode finds it the same way).
     HWND owner = WindowFromDC(wglGetCurrentDC());
     auto typeName = utils::string::utf8ToWide(fmt::format("{} (*{})", text::tr(Msg::FileType), EXTENSION));
-    auto name = save ? utils::string::utf8ToWide(fileName(levelName)) : std::wstring();
-    auto folder = defaultFolder();
+    auto folder = startFolder();
+    auto name = save ? freeName(folder, utils::string::utf8ToWide(fileStem(levelName))) : std::wstring();
     std::thread([=, then = std::move(then)]() mutable {
         HRESULT result = S_OK;
         auto path = showDialog(save, owner, typeName, name, folder, result);
@@ -389,6 +414,7 @@ bool chooseFile(bool save, std::string const& levelName, geode::Function<void(st
                 log::error("File dialog failed: {:#x}", static_cast<uint32_t>(result));
             }
             if (path && save) path = withExtension(*path);
+            if (path) Mod::get()->setSavedValue(LAST_FOLDER, path->parent_path());
             then(std::move(path));
         });
     }).detach();

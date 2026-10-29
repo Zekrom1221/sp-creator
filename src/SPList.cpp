@@ -322,7 +322,11 @@ protected:
         // The game's own filters are ASCII only; the mod's font has Cyrillic letters too.
         m_input->setFilter(std::string(getCommonFilterAllowedChars(CommonFilter::Any)) +
             "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ");
-        m_input->setMaxCharCount(MAX_NAME_CHARS);
+        // Bytes: room for MAX_NAME_CHARS Cyrillic letters, then cut to that many letters of any kind.
+        m_input->setMaxCharCount(MAX_NAME_CHARS * 2);
+        m_input->setCallback([this](std::string const& text) {
+            if (auto fit = fitName(text); fit != text) m_input->setString(fit);
+        });
         m_input->setString(name);
         m_mainLayer->addChildAtPosition(m_input, Anchor::Center, {0.f, 3.f});
 
@@ -333,7 +337,7 @@ protected:
     }
 
     void onSave() {
-        auto name = std::string(m_input->getString());
+        auto name = fitName(std::string(m_input->getString()));
         if (m_save) m_save(utils::string::trim(name));
         this->onClose(nullptr);
     }

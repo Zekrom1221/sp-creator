@@ -1,6 +1,7 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
+#include <Geode/modify/PlayerObject.hpp>
 
 #include "Core.hpp"
 #include "Smoke.hpp"
@@ -50,6 +51,7 @@ struct Snapshot {
     Ref<CheckpointObject> cp;
     Holds holds{};          // buttons held at that moment
     uint64_t inputSeq = 0;  // inputs from this one on came after the checkpoint
+    std::array<Pressed, 2> pressed{};  // the players'
 };
 
 // The current attempt, as played.
@@ -72,6 +74,7 @@ struct Playback {
     size_t nextInput = 0;
     bool controlling = false;  // the auto part owns the buttons until the handoff
     bool injecting = false;
+    bool holdOnly = false;  // the buttons injected now are held, not pressed (holdAgain)
     Holds gameHolds{};  // given to the game
     Holds userHolds{};  // what the player physically holds meanwhile
     // Largest difference from the original run: in the auto part before guiding, then after the handoff.
@@ -405,6 +408,25 @@ void inject(GJBaseGameLayer* layer, int index, bool down) {
     g_play.gameHolds[index] = down;
 }
 
+// At the checkpoint, as the original run was there: the buttons held since before it, held again but not
+// pressed (a press does what the run didn't do there: a spider on the ground teleports right away, a ball or
+// swing flips), and what presses left in the players, which loading the checkpoint clears.
+void holdAgain(PlayLayer* pl, StartPoint const& sp) {
+    // Through the game's handleButton, which knows which players a button moves (both in dual mode).
+    g_play.holdOnly = !sp.pressHolds;
+    for (int i = 1; i < 7; i++) {
+        if (sp.holds[i]) inject(pl, i, true);
+    }
+    g_play.holdOnly = false;
+    if (sp.pressHolds) return;
+    std::array<PlayerObject*, 2> players{pl->m_player1, pl->m_player2};
+    for (size_t p = 0; p < players.size(); p++) {
+        if (!players[p]) continue;
+        players[p]->m_jumpBuffered = sp.pressed[p].jumpBuffered;
+        players[p]->m_stateRingJump = sp.pressed[p].ringJump;
+    }
+}
+
 // Hands the buttons to the player, as they actually hold them, through `press` (inject by default).
 // `early`: they pressed in the auto part with control not blocked, and play on from here.
 void endAutoPart(PlayLayer* pl, bool early, geode::Function<void(int index, bool down)> press = {}) {
@@ -447,11 +469,7 @@ void playStep(PlayLayer* pl) {
     if (pb.controlling && k < sp.handoff()) {
         auto const& f = sp.frames[k];
         trackDiff(now, sp.frames, k, pb.autoX, pb.autoY, pb.autoCam);
-        if (k == 0) {
-            for (int i = 1; i < 7; i++) {
-                if (sp.holds[i]) inject(pl, i, true);
-            }
-        }
+        if (k == 0) holdAgain(pl, sp);
         // Back on the recorded path every step, in case the replay drifts.
         forcePlayer(pl->m_player1, f.p1);
         if (f.dual && pl->m_player2) forcePlayer(pl->m_player2, f.p2);
@@ -473,7 +491,10 @@ void playStep(PlayLayer* pl) {
 }
 
 void takeSnapshot(PlayLayer* pl) {
-    if (auto cp = pl->createCheckpoint()) g_rec.snapshots.push_back({g_rec.step, cp, g_rec.holds, g_rec.inputSeq});
+    auto cp = pl->createCheckpoint();
+    if (!cp) return;
+    auto pressed = [](PlayerObject* p) { return p ? Pressed{p->m_jumpBuffered, p->m_stateRingJump} : Pressed{}; };
+    g_rec.snapshots.push_back({g_rec.step, cp, g_rec.holds, g_rec.inputSeq, {pressed(pl->m_player1), pressed(pl->m_player2)}});
 }
 
 // Before a step: record the state the step starts from, and keep only what an SP placed now could need.
@@ -549,6 +570,7 @@ bool placeSP() {
     sp->id = g_session.nextId++;
     sp->cp = snap->cp;
     sp->holds = snap->holds;
+    sp->pressed = snap->pressed;
     sp->spawnStep = snap->step;
     for (int s = snap->step; s < now; s++) sp->frames.push_back(r.frames[s - r.firstStep]);
     for (auto const& in : r.inputs) {
@@ -605,8 +627,8 @@ bool switchSP(int dir) {
 }
 
 // Takes an SP out of the level, its file left as it is; restarts that went to it go to the one before it
-// (or the level start).
-void dropSP(PlayLayer* pl, std::shared_ptr<StartPoint> const& sp) {
+// (or the level start). `sp` by value: the caller's may be an element of the list it's erased from.
+void dropSP(PlayLayer* pl, std::shared_ptr<StartPoint> sp) {
     auto& s = g_session;
     int i = indexOf(sp);
     if (i < 0) return;
@@ -618,7 +640,7 @@ void dropSP(PlayLayer* pl, std::shared_ptr<StartPoint> const& sp) {
 }
 
 // Deletes an SP; restarts that went to it go to the one before it (or the level start).
-void removeSP(PlayLayer* pl, std::shared_ptr<StartPoint> const& sp) {
+void removeSP(PlayLayer* pl, std::shared_ptr<StartPoint> sp) {
     auto& s = g_session;
     if (indexOf(sp) < 0) return;
     dropSP(pl, sp);
@@ -840,6 +862,17 @@ class $modify(SPCBaseLayer, GJBaseGameLayer) {
         int index = holdIndex(button, isPlayer1);
         g_rec.holds[index] = down;
         g_rec.inputs.push_back({g_rec.step, button, isPlayer1, down, g_rec.inputSeq++});
+    }
+};
+
+class $modify(SPCPlayer, PlayerObject) {
+    bool pushButton(PlayerButton button) {
+        // A button held since before an SP's checkpoint (holdAgain): held, and nothing else a press does.
+        if (g_play.holdOnly) {
+            m_holdingButtons[static_cast<int>(button)] = true;
+            return false;
+        }
+        return PlayerObject::pushButton(button);
     }
 };
 

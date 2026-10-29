@@ -40,10 +40,20 @@ inline int holdIndex(int button, bool p1) {
     return std::clamp(button, 1, 3) + (p1 ? 0 : 3);
 }
 
+// What presses left in a player that loading a checkpoint clears: given back at the spawn (holdAgain).
+struct Pressed {
+    bool jumpBuffered = false;
+    bool ringJump = false;  // m_stateRingJump
+};
+
 struct StartPoint {
     int id = 0;
     geode::Ref<CheckpointObject> cp;
     Holds holds{};              // buttons held when the checkpoint was taken
+    std::array<Pressed, 2> pressed{};  // the players' then
+    // From a file saved before `pressed` went in (0.9.0 betas): held buttons are pressed again at the spawn,
+    // as they were then.
+    bool pressHolds = false;
     std::vector<Frame> frames;  // frames[k]: state before auto-part step k; the player controls from frames.size()
     std::vector<Input> inputs;  // steps relative to the spawn
     std::vector<Frame> tail;    // the original run right after the handoff, for the comparison (not saved)

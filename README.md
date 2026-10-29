@@ -50,7 +50,8 @@ Only classic levels: platformer levels have no SPs.
   updated. Open one to bring its SPs back, rename it, or delete it. Nothing is deleted on its own.
 - **Level updates.** When a level is updated, your SPs are moved over to the new version. One that depends
   on objects the update took away stays in **Versions** only: the message says where it was, so you can place
-  it again.
+  it again. This is for online levels: when you edit your own level, its SPs aren't moved over, and it starts
+  with none (the old ones stay in **SP storage**).
 - **SP storage** in the mod's settings lists the SPs and versions of all levels, the biggest first, to delete
   what you don't need.
 
@@ -63,6 +64,12 @@ Only classic levels: platformer levels have no SPs.
   options.
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with *Bind
   profile* on: editing a profile keeps its old startposes.
+
+## Known issues
+
+- Where the gameplay of a level is rotated or goes back, SPs are in the order of where they stand, not of their
+  percent: there the SP list and the `,` and `.` keys can go back and forth. Mega Hack's switcher orders them
+  the same way.
 
 ## Building
 
