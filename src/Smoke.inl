@@ -108,6 +108,11 @@ struct SmokeTest {
     // it (outside auto parts), so every mode of the level comes up.
     bool steer = false;
     std::vector<CCPoint> portals;  // by x
+    // A watchdog: placing gives up when x stops growing (2.2 levels turn the gameplay, and x stands still),
+    // and a step that waits too long ends the test, so the game never stays open on its own.
+    float furthestX = 0;
+    int stillSteps = 0;
+    int idleSteps = 0;
 };
 
 constexpr int EXTERNAL_KEY_STEPS = 600;
@@ -1477,6 +1482,7 @@ void smokeEnter(GJGameLevel* level) {
 void startPlay(PlayLayer* pl) {
     auto& t = g_smoke;
     auto sp = t.playList[t.playAt];
+    t.idleSteps = 0;
     choose(sp, true);
     t.base = sp->spawnStep;
     t.refIndex = -1;
@@ -1587,6 +1593,7 @@ void nextAction() {
     if (!t.active || t.reentering || !pl) return;
     if (t.actionAt >= t.actions.size()) return finishSmokeTest();
     auto const line = t.actions[t.actionAt++];
+    t.idleSteps = 0;
     log::info("Smoke test: ACTION {}/{}: {}", t.actionAt, t.actions.size(), line);
     auto colon = line.find(':');
     auto op = line.substr(0, colon);
@@ -1624,6 +1631,8 @@ void nextAction() {
         std::sort(t.placeAtX.begin(), t.placeAtX.end());
         t.placed = 0;
         t.placeQueued = false;
+        t.furthestX = 0;
+        t.stillSteps = 0;
         t.recordFirst = true;
         t.firstRun.clear();
         t.firstModes.clear();
@@ -1813,6 +1822,24 @@ void smokeStep(PlayLayer* pl) {
         if (t.recordFirst) {
             auto mode = modeOf(pl);
             if (t.firstModes.empty() || t.firstModes.back().second != mode) t.firstModes.push_back({x, mode});
+        }
+    }
+    if (t.scripted && ++t.idleSteps > 240 * 180) {
+        log::error("Smoke test: STUCK: a step waited 3 minutes, test ended (step {} of {})", t.actionAt, t.actions.size());
+        t.idleSteps = INT_MIN;
+        Loader::get()->queueInMainThread(finishSmokeTest);
+        return;
+    }
+    if (t.placed < t.placeAtX.size() && t.scripted) {
+        float x = pl->m_player1->m_position.x;
+        if (x > t.furthestX + 1.f) {
+            t.furthestX = x;
+            t.stillSteps = 0;
+        }
+        else if (++t.stillSteps > 240 * 10) {
+            log::error("Smoke test: STUCK: x stays at {:.1f} for 10 s, {} SPs left unplaced", x, t.placeAtX.size() - t.placed);
+            t.placed = t.placeAtX.size();
+            t.stepsLeft = TAIL_STEPS + 20;
         }
     }
     if (t.placed < t.placeAtX.size()) {
