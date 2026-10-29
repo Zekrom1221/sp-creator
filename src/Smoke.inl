@@ -86,6 +86,24 @@ struct SmokeTest {
     // The level's Low Detail Mode as it was, given back at the end.
     Ref<GJGameLevel> level;
     std::optional<bool> lowDetailWas;
+    // A script ("actions"): steps run one after another, each logged (see nextAction).
+    std::vector<std::string> actions;
+    size_t actionAt = 0;
+    bool scripted = false;
+    bool started = false;         // the first step ran
+    bool reentering = false;      // out of the level to enter it (or another) again: the test goes on
+    enum class Wait { None, Steps, Placing, Playing } wait = Wait::None;
+    bool placeQueued = false;     // a placing press waits for the frame: one SP a frame
+    bool recordFirst = false;     // the first pass of a "place": hits and player modes by x
+    std::vector<std::pair<float, std::string>> firstModes;  // x where the mode became this
+    int waitAuto = -1;            // "at": the auto part step to wait for
+    int waitAutoSteps = 0;
+    std::vector<std::shared_ptr<StartPoint>> playList;  // "play": SPs to start from, in turn
+    size_t playAt = 0;
+    float handoffX = NAN;         // of the attempt being played, once handed over
+    std::string handoffMode;
+    std::vector<std::function<void()>> restores;  // settings changed by "setting", put back at the end
+    int referenceLevel = 0;       // the level the reference run is of: other levels get blind jumps
 };
 
 constexpr int EXTERNAL_KEY_STEPS = 600;
@@ -102,7 +120,37 @@ void pressKey(enumKeyCodes key) {
     }
 }
 
+// One half of a press, the same way.
+void sendKey(enumKeyCodes key, bool down) {
+    KeyboardInputData data(key, down ? KeyboardInputData::Action::Press : KeyboardInputData::Action::Release,
+        {static_cast<uint64_t>(key), 0}, 0.0, KeyboardModifier::None);
+    if (KeyboardInputEvent(key).send(data) == ListenerResult::Propagate) {
+        CCKeyboardDispatcher::get()->dispatchKeyboardMSG(key, down, false, 0.0);
+    }
+}
+
 SmokeTest g_smoke;
+
+void nextAction();
+
+// What the player is: form, size, gravity, dual, mirror, speed ("ship+mini+upside@0.90").
+std::string modeOf(PlayLayer* pl) {
+    auto p = pl->m_player1;
+    std::string m = p->m_isShip ? "ship" : p->m_isBird ? "ufo" : p->m_isBall ? "ball" : p->m_isDart ? "wave"
+        : p->m_isRobot ? "robot" : p->m_isSpider ? "spider" : p->m_isSwing ? "swing" : "cube";
+    if (p->m_vehicleSize < 1.f) m += "+mini";
+    if (p->m_isUpsideDown) m += "+upside";
+    if (pl->m_gameState.m_isDualMode) m += "+dual";
+    if (pl->m_cameraFlip < 0.f) m += "+mirror";
+    return fmt::format("{}@{:.2f}", m, p->m_playerSpeed);
+}
+
+// The first pass's mode at x.
+std::string firstModeAt(float x) {
+    auto const& modes = g_smoke.firstModes;
+    auto it = std::upper_bound(modes.begin(), modes.end(), x, [](float x, auto const& e) { return x < e.first; });
+    return it == modes.begin() ? "?" : std::prev(it)->second;
+}
 
 // Hits of the first attempt between two x.
 int firstRunHits(float from, float to) {
@@ -280,6 +328,7 @@ void startSmokeTest() {
     std::sort(g_smoke.placeAtX.begin(), g_smoke.placeAtX.end());
     auto ref = root["reference"].asString();
     if (ref.isOk()) g_smoke.reference = loadReference(ref.unwrap());
+    g_smoke.referenceLevel = level->m_levelID.value();
     // Its SPs go to a folder of their own; without SPs to place it tests the ones saved there.
     g_smoke.storageRoot = root["storage_root"].asString().unwrapOr("levels-smoketest");
     storage::setRoot(g_smoke.storageRoot);
@@ -321,11 +370,16 @@ void startSmokeTest() {
     g_smoke.probe = root["probe"].asBool().unwrapOr(false);
     g_smoke.moveVersion = root["move_version"].asBool().unwrapOr(false);
     g_smoke.versionsUI = root["versions_ui"].asBool().unwrapOr(false);
+    for (auto const& step : root["actions"]) {
+        if (auto s = step.asString(); s.isOk()) g_smoke.actions.push_back(s.unwrap());
+    }
+    g_smoke.scripted = !g_smoke.actions.empty();
     if (root.contains("update")) smokeUpdate(level, root["update"]);
-    if (g_smoke.placeAtX.empty()) g_smoke.stepsLeft = 60;
-    log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}", id,
-        level->m_levelName, level->m_stars.value(), g_smoke.placeAtX.size(), g_smoke.reference.size(), g_smoke.cleanup,
-        text::russian());
+    if (g_smoke.placeAtX.empty() && !g_smoke.scripted) g_smoke.stepsLeft = 60;
+    log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}, {} steps, "
+        "block input {}, auto part {:.2f} s", id, level->m_levelName, level->m_stars.value(), g_smoke.placeAtX.size(),
+        g_smoke.reference.size(), g_smoke.cleanup, text::russian(), g_smoke.actions.size(),
+        Mod::get()->getSettingValue<bool>("block-input"), autoPartSeconds());
     CCDirector::get()->replaceScene(PlayLayer::scene(level, false, false));
 }
 
@@ -685,9 +739,17 @@ void smokeImport() {
         g_session.sps.size());
 }
 
+// Last changed first: a setting changed twice ends as it was before both.
+void restoreSmokeSettings() {
+    auto& restores = g_smoke.restores;
+    for (auto it = restores.rbegin(); it != restores.rend(); ++it) (*it)();
+    restores.clear();
+}
+
 void finishSmokeTest() {
     saveUnsaved();
     restoreSmokeLevel();
+    restoreSmokeSettings();
     if (g_smoke.cleanup) storage::removeAll();
     log::info("Smoke test done");
     geode::utils::game::exit(false);
@@ -747,6 +809,22 @@ void pressButton(std::string_view id) {
     auto btn = typeinfo_cast<CCMenuItemSpriteExtra*>(CCScene::get()->getChildByIDRecursive(id));
     log::info("Smoke test: pressing {}: {}", id, btn ? "found" : "not there");
     if (btn) btn->activate();
+}
+
+void afterFrames(int frames, std::function<void()> then);
+
+// The end of the UI part: in a script, its popups closed and the game going on, then the next step.
+void smokeUIDone() {
+    if (!g_smoke.scripted) return finishSmokeTest();
+    std::vector<FLAlertLayer*> popups;
+    for (auto child : CCArrayExt<CCNode*>(CCScene::get()->getChildren())) {
+        if (auto popup = typeinfo_cast<FLAlertLayer*>(child)) popups.push_back(popup);
+    }
+    for (size_t i = popups.size(); i-- > 0;) popups[i]->keyBackClicked();
+    afterFrames(10, [] {
+        if (auto pause = CCScene::get()->getChildByType<PauseLayer>(0)) pause->onResume(nullptr);
+        afterFrames(30, nextAction);
+    });
 }
 
 // The mod's UI, one step every half second: a notification, the pause menu, the SP list, renaming.
@@ -917,7 +995,7 @@ void smokeUI(int stage) {
             log::info("Smoke test: SP list rows: {} for {} SPs", list ? list->m_contentLayer->getChildrenCount() : 0, sps.size());
             captureScreen("smoke-list-end.png");
             logSwitchers("at the end");
-            return finishSmokeTest();
+            return smokeUIDone();
         }
         // The file dialogs through the buttons, as a player goes: export the SPs, then import that file (all
         // of it already here). tools/answer_dialogs.ps1 fills the dialogs in, from outside the game.
@@ -949,7 +1027,7 @@ void smokeUI(int stage) {
                 log::info("Smoke test: after the import: {} popups open, SP list {}, {} SPs", open,
                     CCScene::get()->getChildByIDRecursive("import-button"_spr) ? "there" : "gone", sps.size());
                 captureScreen("smoke-dialog.png");
-                return finishSmokeTest();
+                return smokeUIDone();
             }
             return next();
         }
@@ -1333,20 +1411,360 @@ void nextSmokePhase() {
     finishSmokeTest();
 }
 
+// A script: "actions" in smoketest.json, steps run in turn, each one logged ("Smoke test: ACTION n: ...").
+// The state lines ("STATE <tag>") are what runs compare.
+
+void smokeDescribe(std::string const& tag) {
+    std::vector<std::string> sps, files, versions;
+    for (auto const& sp : g_session.sps) {
+        sps.push_back(fmt::format("{} \"{}\" {:.2f}% x {:.1f} h{}", sp->id, sp->name, sp->percent, sp->x, sp->handoff()));
+    }
+    std::string names = "-", key = "-";
+    if (auto level = storage::level()) {
+        key = level->key;
+        auto dir = Mod::get()->getSaveDir() / g_smoke.storageRoot / level->key;
+        std::error_code ec;
+        for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+            files.push_back(utils::string::pathToString(it->path().filename()));
+        }
+        std::sort(files.begin(), files.end());
+        if (auto res = file::readString(dir / "names.json"); res.isOk()) {
+            names = res.unwrap();
+            std::erase_if(names, [](char c) { return c == '\n' || c == '\r'; });
+        }
+    }
+    for (auto const& v : storage::versions()) {
+        versions.push_back(fmt::format("{} \"{}\" {} SPs{}{}", utils::string::pathToString(v.dir.filename()), v.name, v.sps,
+            v.fits ? "" : " (doesn't fit)", v.movable ? " (movable)" : ""));
+    }
+    log::info("Smoke test: STATE {}: root {}, level {}, {} SPs [{}], active {}, files [{}], names {}, versions {} [{}]", tag,
+        g_smoke.storageRoot, key, sps.size(), fmt::join(sps, "; "), activeLabel(), fmt::join(files, ", "), names,
+        versions.size(), fmt::join(versions, "; "));
+}
+
+GJGameLevel* smokeLevel(std::string const& what) {
+    if (auto id = utils::numFromString<int>(what); id.isOk()) {
+        int i = id.unwrap();
+        return i < 100 ? GameLevelManager::get()->getMainLevel(i, false) : GameLevelManager::get()->getSavedLevel(i);
+    }
+    for (auto local : CCArrayExt<GJGameLevel*>(LocalLevelManager::get()->m_localLevels)) {
+        if (std::string(local->m_levelName) == what) return local;
+    }
+    return nullptr;
+}
+
+// Out of the level the way a player leaves it, and into `level` (the same one: "reenter"), the script going on there.
+void smokeEnter(GJGameLevel* level) {
+    auto& t = g_smoke;
+    t.reentering = true;
+    t.wait = SmokeTest::Wait::None;
+    t.stepsLeft = -1;
+    t.placeAtX.clear();
+    t.placed = 0;
+    t.level = level;
+    if (auto pl = PlayLayer::get()) pl->onQuit();
+    afterFrames(150, [] {
+        log::info("Smoke test: entering \"{}\"", g_smoke.level->m_levelName);
+        CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false, false));
+    });
+}
+
+void startPlay(PlayLayer* pl) {
+    auto& t = g_smoke;
+    auto sp = t.playList[t.playAt];
+    choose(sp, true);
+    t.base = sp->spawnStep;
+    t.refIndex = -1;
+    t.handoffX = NAN;
+    t.handoffMode.clear();
+    pl->resetLevel();
+    t.phaseStartX = pl->m_player1->m_position.x;
+    t.stepsLeft = sp->handoff() + TAIL_STEPS + 200;
+    t.wait = SmokeTest::Wait::Playing;
+}
+
+void logPlay(PlayLayer* pl) {
+    auto& t = g_smoke;
+    auto const& sp = t.playList[t.playAt];
+    float x = pl->m_player1->m_position.x;
+    bool handed = !std::isnan(t.handoffX);
+    log::info("Smoke test: PLAY SP {} \"{}\" x {:.1f}: auto part {} steps, handed over at x {}, as {} (first pass {}); x {:.1f} to "
+        "{:.1f}: {} hits, first pass {}", sp->id, sp->name, sp->x, sp->handoff(), handed ? fmt::format("{:.1f}", t.handoffX) : "-",
+        handed ? t.handoffMode : "-", handed ? firstModeAt(t.handoffX) : "-", t.phaseStartX, x, g_rec.hits,
+        firstRunHits(t.phaseStartX, x));
+}
+
+// The time an attempt or a wait took is up.
+void stepsDone() {
+    auto& t = g_smoke;
+    auto pl = PlayLayer::get();
+    if (!pl) return;
+    if (t.wait == SmokeTest::Wait::Placing) {
+        t.recordFirst = false;
+        std::vector<std::string> modes;
+        for (auto const& [x, mode] : t.firstModes) modes.push_back(fmt::format("{:.0f} {}", x, mode));
+        log::info("Smoke test: placing done: {} SPs, first pass modes [{}]", g_session.sps.size(), fmt::join(modes, ", "));
+    }
+    else if (t.wait == SmokeTest::Wait::Playing) {
+        logPlay(pl);
+        if (++t.playAt < t.playList.size()) return startPlay(pl);
+    }
+    t.wait = SmokeTest::Wait::None;
+    nextAction();
+}
+
+enumKeyCodes keyNamed(std::string const& name) {
+    if (name == "Comma") return KEY_OEMComma;
+    if (name == "Period") return KEY_OEMPeriod;
+    if (name == "Delete") return KEY_Delete;
+    if (name == "Space") return KEY_Space;
+    if (name.size() == 1 && std::isalnum(static_cast<unsigned char>(name[0]))) {
+        return static_cast<enumKeyCodes>(std::toupper(static_cast<unsigned char>(name[0])));
+    }
+    return KEY_None;
+}
+
+// `left` presses, `gap` frames apart (0: in the same frame).
+void smokeKeys(enumKeyCodes key, int left, int gap) {
+    pressKey(key);
+    if (--left <= 0) return afterFrames(2, nextAction);
+    if (gap <= 0) return smokeKeys(key, left, gap);
+    afterFrames(gap, [=] { smokeKeys(key, left, gap); });
+}
+
+void smokeSetting(std::string const& key, std::string const& value) {
+    auto mod = Mod::get();
+    auto& restores = g_smoke.restores;
+    if (key == "auto-part-length") {
+        auto was = mod->getSettingValue<double>(key);
+        restores.push_back([key, was] { Mod::get()->setSettingValue<double>(key, was); });
+        mod->setSettingValue<double>(key, utils::numFromString<double>(value).unwrapOr(was));
+    }
+    else if (key == "language") {
+        auto was = mod->getSettingValue<std::string>(key);
+        restores.push_back([key, was] { Mod::get()->setSettingValue<std::string>(key, was); });
+        mod->setSettingValue<std::string>(key, value);
+    }
+    else {
+        auto was = mod->getSettingValue<bool>(key);
+        restores.push_back([key, was] { Mod::get()->setSettingValue<bool>(key, was); });
+        mod->setSettingValue<bool>(key, value == "true");
+    }
+    log::info("Smoke test: setting {} is {} now", key, value);
+}
+
+// A name typed into the rename popup of SP i, as from the keyboard, and saved.
+void smokeRename(size_t i, std::string const& typed) {
+    auto const& sps = g_session.sps;
+    if (i >= sps.size()) {
+        log::warn("Smoke test: no SP {} to rename", i);
+        return afterFrames(2, nextAction);
+    }
+    splist::openRename(sps[i]);
+    afterFrames(10, [typed] {
+        auto input = findFirstChildRecursive<TextInput>(CCScene::get(), [](auto) { return true; });
+        if (!input) {
+            log::warn("Smoke test: no name field");
+            return afterFrames(2, nextAction);
+        }
+        input->setString("");
+        input->focus();
+        CCIMEDispatcher::sharedDispatcher()->dispatchInsertText(typed.c_str(), static_cast<int>(typed.size()), KEY_None);
+        log::info("Smoke test: typed \"{}\" ({} bytes), the field holds \"{}\"", typed, typed.size(), std::string(input->getString()));
+        pressButton("save-name-button"_spr);
+        afterFrames(10, nextAction);
+    });
+}
+
+void nextAction() {
+    auto& t = g_smoke;
+    auto pl = PlayLayer::get();
+    if (!t.active || t.reentering || !pl) return;
+    if (t.actionAt >= t.actions.size()) return finishSmokeTest();
+    auto const line = t.actions[t.actionAt++];
+    log::info("Smoke test: ACTION {}/{}: {}", t.actionAt, t.actions.size(), line);
+    auto colon = line.find(':');
+    auto op = line.substr(0, colon);
+    auto rest = colon == std::string::npos ? std::string() : line.substr(colon + 1);
+    auto args = utils::string::split(rest, ":");
+    auto arg = [&](size_t i, int fallback) { return i < args.size() ? utils::numFromString<int>(args[i]).unwrapOr(fallback) : fallback; };
+    auto next = [] { Loader::get()->queueInMainThread(nextAction); };
+    auto const& sps = g_session.sps;
+    if (op == "describe") {
+        smokeDescribe(rest);
+        return next();
+    }
+    if (op == "restart") {
+        pl->resetLevel();
+        return afterFrames(30, nextAction);
+    }
+    if (op == "reenter") return smokeEnter(t.level);
+    if (op == "level") {
+        auto level = smokeLevel(rest);
+        if (!level || std::string(level->m_levelString).empty()) {
+            log::error("Smoke test: level {} is not there", rest);
+            return next();
+        }
+        return smokeEnter(level);
+    }
+    if (op == "root") {
+        t.storageRoot = rest;
+        storage::setRoot(rest);
+        log::info("Smoke test: SPs in {} from the next level entered", rest);
+        return next();
+    }
+    if (op == "place") {
+        t.placeAtX.clear();
+        for (auto const& x : utils::string::split(rest, ",")) t.placeAtX.push_back(utils::numFromString<float>(x).unwrapOr(0.f));
+        std::sort(t.placeAtX.begin(), t.placeAtX.end());
+        t.placed = 0;
+        t.placeQueued = false;
+        t.recordFirst = true;
+        t.firstRun.clear();
+        t.firstModes.clear();
+        t.base = 0;
+        t.refIndex = -1;
+        t.stepsLeft = -1;
+        t.wait = SmokeTest::Wait::Placing;
+        choose(nullptr, true);
+        pl->resetLevel();
+        return;
+    }
+    if (op == "key") {
+        auto key = keyNamed(args.empty() ? "" : args[0]);
+        if (key == KEY_None) {
+            log::error("Smoke test: no key {}", rest);
+            return next();
+        }
+        return smokeKeys(key, std::max(1, arg(1, 1)), arg(2, 1));
+    }
+    if (op == "down" || op == "up") {
+        sendKey(keyNamed(rest), op == "down");
+        return afterFrames(1, nextAction);
+    }
+    // The jump button as the game passes it on (keyboard jumps don't come through pressKey: Click Between
+    // Frames takes them from raw input): "jump" presses, "jump:up" lets go.
+    if (op == "jump") {
+        bool down = rest != "up";
+        pl->handleButton(down, 1, true);
+        log::info("Smoke test: jump {}: auto part {}, jump held {}", down ? "pressed" : "let go",
+            g_play.sp && g_play.controlling ? "goes on" : "off", g_rec.holds[1]);
+        return afterFrames(1, nextAction);
+    }
+    if (op == "from") {
+        size_t i = static_cast<size_t>(arg(0, 0));
+        if (i >= sps.size()) {
+            log::warn("Smoke test: no SP {}", i);
+            return next();
+        }
+        choose(sps[i], true);
+        t.base = sps[i]->spawnStep;
+        t.refIndex = -1;
+        pl->resetLevel();
+        t.phaseStartX = pl->m_player1->m_position.x;
+        return next();
+    }
+    if (op == "at") {
+        t.waitAuto = arg(0, 0);
+        t.waitAutoSteps = 0;
+        return;
+    }
+    if (op == "wait") {
+        t.stepsLeft = std::max(1, arg(0, 60));
+        t.wait = SmokeTest::Wait::Steps;
+        return;
+    }
+    if (op == "play") {
+        t.playList = sps;
+        t.playAt = 0;
+        if (t.playList.empty()) {
+            log::info("Smoke test: no SPs to play");
+            return next();
+        }
+        return startPlay(pl);
+    }
+    if (op == "setting") {
+        if (args.size() >= 2) smokeSetting(args[0], rest.substr(args[0].size() + 1));
+        return next();
+    }
+    if (op == "open") {
+        auto path = Mod::get()->getSaveDir() / std::filesystem::path(utils::string::utf8ToWide(args.empty() ? "" : args[0]));
+        auto pack = transfer::open(path);
+        if (pack.isErr()) {
+            log::info("Smoke test: OPEN {}: refused: {}", args.empty() ? "" : args[0], pack.unwrapErr());
+            return next();
+        }
+        auto const& items = pack.unwrap().items;
+        std::vector<std::string> names;
+        for (auto const& item : items) names.push_back(fmt::format("\"{}\" ({} bytes)", item.name, item.name.size()));
+        auto count = [&](auto pred) { return std::count_if(items.begin(), items.end(), pred); };
+        log::info("Smoke test: OPEN {}: {} SPs, {} already here, {} repeated, {} damaged, the level's own {}, names [{}]", args[0],
+            items.size(), count([](auto const& i) { return i.here; }), count([](auto const& i) { return i.repeated; }),
+            pack.unwrap().damaged, pack.unwrap().sameAsLevel, fmt::join(names, ", "));
+        if (args.size() < 2 || args[1] != "show") return next();
+        // The import list with those names on it, then closed.
+        splist::openImport(std::move(pack).unwrap());
+        return afterFrames(30, [] {
+            closeTopPopup();
+            afterFrames(10, nextAction);
+        });
+    }
+    if (op == "ui") {
+        t.ui = t.uiDone = true;
+        return smokeUI(0);
+    }
+    if (op == "transfer") {
+        if (t.exportTo.empty()) t.exportTo = "smoke-qa-export.spcreator";
+        if (!sps.empty()) smokeTransfer();
+        return next();
+    }
+    if (op == "delete_list") {
+        size_t i = static_cast<size_t>(arg(0, 0));
+        if (i < sps.size()) core::remove(sps[i]);
+        return next();
+    }
+    if (op == "rename") {
+        auto nameAt = rest.find(':');
+        return smokeRename(static_cast<size_t>(arg(0, 0)), nameAt == std::string::npos ? std::string() : rest.substr(nameAt + 1));
+    }
+    log::error("Smoke test: no such step: {}", op);
+    next();
+}
+
 // Before each step of the smoke test.
 void smokeStep(PlayLayer* pl) {
     auto& t = g_smoke;
     if (t.dying) {
         // No input: the player crashes soon after the handoff.
     }
-    else if (!t.reference.empty()) {
+    else if (!t.reference.empty() && pl->m_level->m_levelID.value() == t.referenceLevel) {
         // During the auto part the SP's own replay drives.
         if (!(g_play.sp && g_play.controlling)) followReference(pl);
     }
     else {
+        // Blind jumps: held 30 steps of every 120, counted in the steps of the first attempt. Never pressed in
+        // the auto part (with control not blocked a press would end it): held as a player would, so the handoff
+        // gives the game what the first attempt held there.
         int run = t.base + g_rec.step;
-        if (run % 120 == 0) pl->handleButton(true, 1, true);
-        if (run % 120 == 30) pl->handleButton(false, 1, true);
+        bool hold = run % 120 < 30;
+        if (g_play.sp && g_play.controlling) g_play.userHolds[1] = hold;
+        else if (hold != g_rec.holds[1]) pl->handleButton(hold, 1, true);
+    }
+    if (g_play.sp && g_play.controlling && g_play.step == g_play.sp->handoff()) {
+        t.handoffX = pl->m_player1->m_position.x;
+        t.handoffMode = modeOf(pl);
+    }
+    if (t.waitAuto >= 0) {
+        if (g_play.sp && g_play.controlling && g_play.step >= t.waitAuto) {
+            log::info("Smoke test: at step {} of the auto part of SP {}, x {:.1f}", g_play.step, g_play.sp->id, pl->m_player1->m_position.x);
+            t.waitAuto = -1;
+            Loader::get()->queueInMainThread(nextAction);
+        }
+        else if (++t.waitAutoSteps > 3000) {
+            log::warn("Smoke test: no auto part step {} came", t.waitAuto);
+            t.waitAuto = -1;
+            Loader::get()->queueInMainThread(nextAction);
+        }
     }
     if (t.externalOn && ++t.externalStep % EXTERNAL_KEY_STEPS == 0 && t.externalPressed < t.externalKeys.size()) {
         auto key = t.externalKeys[t.externalPressed++];
@@ -1365,15 +1783,29 @@ void smokeStep(PlayLayer* pl) {
         t.checkHold = false;
         log::info("Smoke test: a step after the press: jump held {}, auto part {}", g_rec.holds[1], g_play.sp ? "on" : "off");
     }
-    if (t.tested == 0) t.firstRun.push_back({pl->m_player1->m_position.x, g_rec.hits});
+    if (t.recordFirst || (!t.scripted && t.tested == 0)) {
+        float x = pl->m_player1->m_position.x;
+        t.firstRun.push_back({x, g_rec.hits});
+        if (t.recordFirst) {
+            auto mode = modeOf(pl);
+            if (t.firstModes.empty() || t.firstModes.back().second != mode) t.firstModes.push_back({x, mode});
+        }
+    }
     if (t.placed < t.placeAtX.size()) {
-        if (pl->m_player1->m_position.x >= t.placeAtX[t.placed]) {
+        // One SP a frame: a press waits for the frame, and two in one would be the same SP.
+        if (!t.placeQueued && pl->m_player1->m_position.x >= t.placeAtX[t.placed]) {
+            t.placeQueued = true;
             if (++t.placed == t.placeAtX.size()) t.stepsLeft = TAIL_STEPS + 20;
-            Loader::get()->queueInMainThread([] { placeSP(); });
+            Loader::get()->queueInMainThread([] {
+                g_smoke.placeQueued = false;
+                // A script places SPs through the key, as a player does.
+                if (g_smoke.scripted) pressKey(KEY_V);
+                else placeSP();
+            });
         }
         return;
     }
-    if (t.stepsLeft > 0 && --t.stepsLeft == 0) Loader::get()->queueInMainThread(nextSmokePhase);
+    if (t.stepsLeft > 0 && --t.stepsLeft == 0) Loader::get()->queueInMainThread(t.scripted ? stepsDone : nextSmokePhase);
 }
 
 }
@@ -1413,6 +1845,15 @@ void loaded(PlayLayer* pl, storage::Loaded const& loaded) {
 void ready(PlayLayer* pl) {
     auto& t = g_smoke;
     if (!t.active) return;
+    if (t.scripted) {
+        // The first step a second in, or the next one once in the level again.
+        bool again = std::exchange(t.reentering, false);
+        if (!t.started || again) {
+            t.started = true;
+            pl->runAction(CCSequence::create(CCDelayTime::create(1.f), CallFuncExt::create([] { nextAction(); }), nullptr));
+        }
+        return;
+    }
     if (!t.importFrom.empty()) smokeImport();
     if (t.moveVersion) smokeMoveVersion();
     if (t.checkSaved) smokeCheckSaved();
@@ -1452,9 +1893,14 @@ void died(PlayLayer* pl) {
 
 void quitting() {
     if (!g_smoke.active) return;
+    if (g_smoke.reentering) {
+        log::info("Smoke test: out of the level, to enter one again");
+        return;
+    }
     // Left midway: its noclip and the rest end here.
     log::warn("Smoke test: the level was quit, test stopped");
     restoreSmokeLevel();
+    restoreSmokeSettings();
     g_smoke = SmokeTest{};
     g_smokeTakeover = false;
 }
