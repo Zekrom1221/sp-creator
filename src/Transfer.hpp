@@ -42,11 +42,13 @@ namespace transfer {
         std::vector<Item> items;  // by position
         int damaged = 0;          // SPs in the file that can't be used
         bool sameAsLevel = false; // the level has these SPs and no others
+        bool movedOver = false;   // from a version for another level version (openVersion)
+        std::vector<float> notMoved;  // then: percents of its SPs that couldn't be moved over
     };
 
     // Reads a file and checks it against the open level. The error is for the player.
     geode::Result<Pack> open(std::filesystem::path const& path);
-    // A version of the level's SPs, checked the same way.
+    // A version of the level's SPs, checked the same way; one for another level version, moved over.
     geode::Result<Pack> openVersion(storage::Version const& version);
     // Adds the picked items to the level, or puts them in place of its own SPs.
     core::ImportResult take(Pack const& pack, std::vector<bool> const& picked, core::Replace replace);

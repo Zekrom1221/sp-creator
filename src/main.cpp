@@ -4,6 +4,7 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
+#include <Geode/cocos/support/zip_support/ZipUtils.h>
 #include <Geode/utils/file.hpp>
 
 #include "Core.hpp"
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <cmath>
 #include <deque>
+#include <set>
 #include <memory>
 
 using namespace geode::prelude;
@@ -767,6 +769,17 @@ struct SmokeTest {
     bool quit = false;
     // UI: the file dialogs through the buttons instead of renaming and the lists (tools/answer_dialogs.ps1).
     bool dialogs = false;
+    // Moving SPs over to a new level version: the level updated in memory before it's entered (the real
+    // one given back once the SPs are loaded); what the move-over stands on, logged; the version for the
+    // level before the update taken back through the Versions list's way; that list, pictured.
+    matjson::Value update;
+    bool updated = false;
+    gd::string realLevelString;
+    int realLevelVersion = 0;
+    bool probe = false;
+    bool moveVersion = false;
+    bool versionsUI = false;
+    bool versionsUIDone = false;
     unsigned int waitFrom = 0;
     int waits = 0;
     // The level's Low Detail Mode as it was, given back at the end.
@@ -863,6 +876,76 @@ void followReference(PlayLayer* pl) {
     p->setRotation(r.rot);
 }
 
+// An object of a level string ("1,8,2,105,3,15,...") with its y moved by `dy`.
+std::string movedUp(std::string const& object, float dy) {
+    auto parts = utils::string::split(object, ",");
+    for (size_t i = 0; i + 1 < parts.size(); i += 2) {
+        if (parts[i] == "3") parts[i + 1] = fmt::format("{}", utils::numFromString<float>(parts[i + 1]).unwrapOr(0.f) + dy);
+    }
+    return fmt::format("{}", fmt::join(parts, ","));
+}
+
+// The level as its author might update it, in memory only: objects of its string deleted ("delete": indices,
+// which are m_objects ones: see smokeProbe), copies of one put in far above the level ("insert": {"at",
+// "of", "copies"}, original indices), shifting those after them; the version raised ("bump", on by
+// default). The real level comes back once the SPs are loaded (restoreSmokeUpdate).
+void smokeUpdate(GJGameLevel* level, matjson::Value const& update) {
+    auto raw = std::string(ZipUtils::decompressString(level->m_levelString, false, 0));
+    auto parts = utils::string::split(raw, ";");
+    if (parts.size() < 2) return log::error("Smoke test: update: no objects in the level string");
+    std::vector<std::string> objects(parts.begin() + 1, parts.end());
+    std::erase_if(objects, [](auto const& o) { return o.empty(); });
+    std::set<size_t> gone;
+    for (auto const& v : update["delete"]) gone.insert(static_cast<size_t>(v.asInt().unwrapOr(-1)));
+    // Or by what they are: [id, x, y], every object like that.
+    for (auto const& like : update["delete_like"]) {
+        auto id = fmt::to_string(like[0].asInt().unwrapOr(0));
+        auto x = static_cast<float>(like[1].asDouble().unwrapOr(0)), y = static_cast<float>(like[2].asDouble().unwrapOr(0));
+        for (size_t i = 0; i < objects.size(); i++) {
+            auto fields = utils::string::split(objects[i], ",");
+            bool sameId = false, sameX = false, sameY = false;
+            for (size_t k = 0; k + 1 < fields.size(); k += 2) {
+                if (fields[k] == "1") sameId = fields[k + 1] == id;
+                if (fields[k] == "2") sameX = std::abs(utils::numFromString<float>(fields[k + 1]).unwrapOr(NAN) - x) < 0.01f;
+                if (fields[k] == "3") sameY = std::abs(utils::numFromString<float>(fields[k + 1]).unwrapOr(NAN) - y) < 0.01f;
+            }
+            if (sameId && sameX && sameY) gone.insert(i);
+        }
+    }
+    std::vector<std::string> kept;
+    for (size_t i = 0; i < objects.size(); i++) {
+        if (!gone.contains(i)) kept.push_back(objects[i]);
+    }
+    if (update.contains("insert")) {
+        auto const& insert = update["insert"];
+        auto at = static_cast<size_t>(insert["at"].asInt().unwrapOr(0));
+        auto of = static_cast<size_t>(insert["of"].asInt().unwrapOr(0));
+        auto copies = static_cast<size_t>(insert["copies"].asInt().unwrapOr(1));
+        size_t pos = 0;
+        for (size_t i = 0; i < at && i < objects.size(); i++) pos += !gone.contains(i);
+        if (of < objects.size()) kept.insert(kept.begin() + pos, copies, movedUp(objects[of], 30000.f));
+    }
+    std::string joined = parts[0] + ";";
+    for (auto const& o : kept) joined += o + ";";
+    auto& t = g_smoke;
+    t.realLevelString = level->m_levelString;
+    t.realLevelVersion = level->m_levelVersion;
+    t.updated = true;
+    level->m_levelString = ZipUtils::compressString(joined, false, 0);
+    if (update["bump"].asBool().unwrapOr(true)) level->m_levelVersion += 1;
+    log::info("Smoke test: update: {} objects -> {}, version {} -> {}", objects.size(), kept.size(), t.realLevelVersion,
+        level->m_levelVersion);
+}
+
+void restoreSmokeUpdate() {
+    auto& t = g_smoke;
+    if (!t.updated || !t.level) return;
+    t.level->m_levelString = t.realLevelString;
+    t.level->m_levelVersion = t.realLevelVersion;
+    t.updated = false;
+    log::info("Smoke test: update: the level is as it was");
+}
+
 void startSmokeTest() {
     auto path = smokeTestPath("");
     std::error_code ec;
@@ -935,6 +1018,10 @@ void startSmokeTest() {
         else log::error("Smoke test: storage_ui needs a storage_root of its own (levels-smoketest...)");
     }
     g_smoke.dialogs = root["dialogs"].asBool().unwrapOr(false);
+    g_smoke.probe = root["probe"].asBool().unwrapOr(false);
+    g_smoke.moveVersion = root["move_version"].asBool().unwrapOr(false);
+    g_smoke.versionsUI = root["versions_ui"].asBool().unwrapOr(false);
+    if (root.contains("update")) smokeUpdate(level, root["update"]);
     if (g_smoke.placeAtX.empty()) g_smoke.stepsLeft = 60;
     log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}", id,
         level->m_levelName, level->m_stars.value(), g_smoke.placeAtX.size(), g_smoke.reference.size(), g_smoke.cleanup,
@@ -1060,6 +1147,7 @@ bool smokeCompat(PlayLayer* pl) {
 }
 
 void restoreSmokeLevel() {
+    restoreSmokeUpdate();
     auto& t = g_smoke;
     if (t.level && t.lowDetailWas) t.level->m_lowDetailModeToggled = *t.lowDetailWas;
     t.lowDetailWas.reset();
@@ -1739,6 +1827,108 @@ void smokeQuit() {
     });
 }
 
+// What moving SPs over stands on, seen in the level right after its SPs are loaded: the level string's
+// objects in m_objects order (the update test deletes by index), the prints' start fields set, and the
+// objects each SP's checkpoint refers to (<mod save dir>/smoke-refs.json: indices, their object IDs and x).
+void smokeProbe(PlayLayer* pl) {
+    auto raw = std::string(ZipUtils::decompressString(pl->m_level->m_levelString, false, 0));
+    auto parts = utils::string::split(raw, ";");
+    std::vector<std::string> objects(parts.begin() + (parts.empty() ? 0 : 1), parts.end());
+    std::erase_if(objects, [](auto const& o) { return o.empty(); });
+    size_t count = pl->m_objects->count(), checked = std::min(objects.size(), count), sameId = 0, sameX = 0, unset = 0;
+    long long firstOff = -1;
+    for (size_t i = 0; i < checked; i++) {
+        auto obj = static_cast<GameObject*>(pl->m_objects->objectAtIndex(i));
+        auto fields = utils::string::split(objects[i], ",");
+        int id = 0;
+        float x = NAN;
+        for (size_t k = 0; k + 1 < fields.size(); k += 2) {
+            if (fields[k] == "1") id = utils::numFromString<int>(fields[k + 1]).unwrapOr(0);
+            if (fields[k] == "2") x = utils::numFromString<float>(fields[k + 1]).unwrapOr(NAN);
+        }
+        bool same = id == obj->m_objectID && std::abs(x - obj->m_startPosition.x) < 0.01f;
+        sameId += id == obj->m_objectID;
+        sameX += std::abs(x - obj->m_startPosition.x) < 0.01f;
+        if (!same && firstOff < 0) firstOff = static_cast<long long>(i);
+        unset += obj->m_startPosition.x == 0.f && obj->m_startPosition.y == 0.f;
+    }
+    log::info("Smoke test: probe: {} objects in the string, {} in m_objects; of {}: {} same ID, {} same x (start position), "
+        "first off at {}; {} with no start position", objects.size(), count, checked, sameId, sameX, firstOff, unset);
+
+    auto dump = matjson::Value::object();
+    for (auto const& refs : storage::referencesOfSPs()) {
+        auto const& seen = refs.all;
+        auto id = refs.id;
+        auto list = matjson::Value::array();
+        for (auto index : seen) {
+            auto obj = index < count ? static_cast<GameObject*>(pl->m_objects->objectAtIndex(index)) : nullptr;
+            list.push(matjson::makeObject({{"i", static_cast<int>(index)}, {"id", obj ? obj->m_objectID : -1},
+                {"x", obj ? obj->m_startPosition.x : 0.f}, {"y", obj ? obj->m_startPosition.y : 0.f},
+                {"t", obj && typeinfo_cast<EffectGameObject*>(obj) ? 1 : 0},
+                {"s", std::binary_search(refs.states.begin(), refs.states.end(), index) ? 1 : 0}}));
+        }
+        log::info("Smoke test: probe: SP {} refers to {} objects{}, {} of them with an object state", id, seen.size(),
+            seen.empty() ? std::string() : fmt::format(", {} to {}", seen.front(), seen.back()), refs.states.size());
+        dump[fmt::to_string(id)] = std::move(list);
+    }
+    auto res = file::writeString(Mod::get()->getSaveDir() / "smoke-refs.json", dump.dump());
+    if (res.isErr()) log::error("Smoke test: probe: {}", res.unwrapErr());
+    // For picking objects to delete.
+    (void)file::writeString(Mod::get()->getSaveDir() / "smoke-level.txt", raw);
+}
+
+// The version for the level before the update, taken back the Versions list's way, in place of the SPs
+// moved over on entering: so the attempts after it are from these.
+void smokeMoveVersion() {
+    auto versions = storage::versions();
+    for (auto const& v : versions) {
+        log::info("Smoke test: version {}: {} SPs, fits {}, movable {}", v.dir.filename(), v.sps, v.fits, v.movable);
+    }
+    auto it = std::find_if(versions.begin(), versions.end(), [](auto const& v) { return v.movable; });
+    if (it == versions.end()) return log::error("Smoke test: no version to move over");
+    auto pack = transfer::openVersion(*it);
+    if (pack.isErr()) return log::error("Smoke test: moving the version over refused: {}", pack.unwrapErr());
+    auto const& p = pack.unwrap();
+    size_t here = std::count_if(p.items.begin(), p.items.end(), [](auto const& item) { return item.here; });
+    log::info("Smoke test: version moved over: {} SPs ({} like the level's), not moved {} ({})", p.items.size(), here,
+        p.notMoved.size(), text::percents(p.notMoved));
+    auto result = transfer::take(p, std::vector<bool>(p.items.size(), true), core::Replace::Delete);
+    log::info("Smoke test: in place of the level's SPs: {} added, {} failed, {} SPs now", result.added, result.failed,
+        g_session.sps.size());
+}
+
+// The Versions list with a version for the level before the update, and that version opened.
+void smokeVersionsUI(int stage) {
+    auto pl = PlayLayer::get();
+    if (!pl) return finishSmokeTest();
+    auto next = [stage](float delay = 0.6f) {
+        CCScene::get()->runAction(CCSequence::create(CCDelayTime::create(delay),
+            CallFuncExt::create([stage] { smokeVersionsUI(stage + 1); }), nullptr));
+    };
+    switch (stage) {
+        case 0:
+            g_smoke.pausing = true;
+            pl->pauseGame(false);
+            g_smoke.pausing = false;
+            return next();
+        case 1:
+            pressButton("sp-list-button"_spr);
+            return next();
+        case 2:
+            pressButton("versions-button"_spr);
+            return next();
+        case 3:
+            captureScreen("smoke-versions-move.png");
+            g_lastNotice.clear();
+            pressButton(fmt::format("{}/move-version-0", Mod::get()->getID()));
+            return next();
+        case 4:
+            log::info("Smoke test: moving from the list: notice \"{}\"", g_lastNotice);
+            captureScreen("smoke-version-moved.png");
+            return finishSmokeTest();
+    }
+}
+
 void nextSmokePhase() {
     auto pl = PlayLayer::get();
     auto& t = g_smoke;
@@ -1830,6 +2020,11 @@ void nextSmokePhase() {
         }
         return;
     }
+    if (t.versionsUI && !t.versionsUIDone) {
+        t.versionsUIDone = true;
+        smokeVersionsUI(0);
+        return;
+    }
     if (t.ui && !t.uiDone) {
         t.uiDone = true;
         smokeUI(0);
@@ -1893,7 +2088,14 @@ void notifyLoaded(storage::Loaded const& loaded, size_t count) {
         case Notice::None: break;
         case Notice::Loaded: notify(NotificationIcon::Info, Msg::Loaded, count); break;
         case Notice::Failed: notify(warn, Msg::Failed, loaded.failed); break;
-        case Notice::LevelChanged: notify(warn, Msg::LevelChanged); break;
+        case Notice::LevelChanged:
+            if (!loaded.movedOver) notify(warn, Msg::LevelChanged);
+            else if (loaded.notMoved.empty()) notify(NotificationIcon::Success, Msg::LevelUpdated, loaded.moved);
+            else {
+                notify(fmt::format("{}, {}", text::format(Msg::LevelUpdated, loaded.moved),
+                    text::format(Msg::NotMoved, loaded.notMoved.size(), text::percents(loaded.notMoved))), warn);
+            }
+            break;
         case Notice::CantSave: notify(warn, Msg::CantSave); break;
         case Notice::CantMoveAside: notify(warn, Msg::CantMoveAside); break;
         case Notice::SPsWithLowDetail: notify(warn, Msg::SPsWithLowDetail); break;
@@ -2108,6 +2310,14 @@ class $modify(SPCPlayLayer, PlayLayer) {
         g_session.levelTestMode = m_isTestMode;
         PlayLayer::setupHasCompleted();
         auto loaded = storage::load(this);
+        if (g_smoke.active) {
+            restoreSmokeUpdate();
+            if (loaded.movedOver) {
+                log::info("Smoke test: SPs moved over to this version: {}, not: {} ({})", loaded.moved, loaded.notMoved.size(),
+                    text::percents(loaded.notMoved));
+            }
+            if (g_smoke.probe) smokeProbe(this);
+        }
         g_session.sps = std::move(loaded.sps);
         g_session.nextId = loaded.nextId;
         // After the level's objects and its anticheat spike: theirs keep their places in m_objects (and so
@@ -2115,6 +2325,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         for (auto const& sp : g_session.sps) addObjectFor(this, *sp);
         notifyLoaded(loaded, g_session.sps.size());
         if (g_smoke.active && !g_smoke.importFrom.empty()) smokeImport();
+        if (g_smoke.active && g_smoke.moveVersion) smokeMoveVersion();
         if (g_smoke.active && g_smoke.checkSaved) smokeCheckSaved();
         if (g_smoke.active && g_smoke.storageUI) {
             this->runAction(CCSequence::create(CCDelayTime::create(1.f), CallFuncExt::create([] { smokeStorage(0); }), nullptr));

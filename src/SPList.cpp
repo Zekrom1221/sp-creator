@@ -426,7 +426,7 @@ protected:
         if (confirming) label->setColor(CONFIRM_COLOR);
         node->addChildAtPosition(label, Anchor::Left, {10.f, 6.f}, false);
         auto under = named ? fmt::format("{}, {}", text::date(v.time), info(v)) : info(v);
-        auto note = text::label(v.fits ? under : fmt::format("{}, {}", under, str(Msg::VersionDeleteOnly)));
+        auto note = text::label(v.fits ? under : fmt::format("{}, {}", under, str(v.movable ? Msg::VersionMovable : Msg::VersionDeleteOnly)));
         note->setAnchorPoint({0.f, 0.5f});
         note->limitLabelWidth(LIST_WIDTH - 120.f, 0.32f, 0.1f);
         note->setColor(v.fits ? NOTE_COLOR : NEAR_COLOR);
@@ -441,6 +441,12 @@ protected:
             auto open = textButton(str(Msg::Open), [this, v](auto) { this->onOpen(v); }, 0.6f);
             open->setID(fmt::format("{}/open-version-{}", Mod::get()->getID(), i));
             menu->addChild(open);
+        }
+        else if (v.movable) {
+            // Only once the level changed: SPs of the open version need no moving.
+            auto move = textButton(str(Msg::MoveOver), [this, v](auto) { this->onOpen(v); }, 0.6f);
+            move->setID(fmt::format("{}/move-version-{}", Mod::get()->getID(), i));
+            menu->addChild(move);
         }
         auto rename = renameButton([this, v](auto) { this->onRename(v); });
         rename->setID(fmt::format("{}/rename-version-{}", Mod::get()->getID(), i));
@@ -489,7 +495,15 @@ protected:
         bool named = !v.name.empty();
         auto title = named ? v.name : text::format(Msg::VersionTitle, text::date(v.time));
         auto message = named ? fmt::format("{}, {}, {}", text::date(v.time), reason(v), info(v)) : fmt::format("{}, {}", reason(v), info(v));
-        auto popup = ImportPopup::create(std::move(pack).unwrap(), title, message, NOTE_COLOR, [self] {
+        auto color = NOTE_COLOR;
+        if (auto const& p = pack.unwrap(); p.movedOver) {
+            message = text::format(Msg::VersionMovedOver, p.items.size());
+            if (!p.notMoved.empty()) {
+                message += ", " + text::format(Msg::NotMoved, p.notMoved.size(), text::percents(p.notMoved));
+                color = NEAR_COLOR;
+            }
+        }
+        auto popup = ImportPopup::create(std::move(pack).unwrap(), title, message, color, [self] {
                 // Replacing may have made a version.
                 self->refresh();
                 if (self->m_changed) self->m_changed();

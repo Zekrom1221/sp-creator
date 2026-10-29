@@ -26,6 +26,8 @@
 #include <ctime>
 #include <fstream>
 #include <map>
+#include <set>
+#include <unordered_map>
 
 using namespace geode::prelude;
 using namespace persistenceAPI;
@@ -55,12 +57,25 @@ constexpr int FIRST_OBJECT_ID = 12;
 
 std::filesystem::path g_root = "levels";
 
+// What tells a level object from the others, in one level version and the next: the same object (not
+// changed by the update) has the same print. Saved with the SPs (objects.bin), so that SPs of an older
+// version can be moved over to the objects they refer to (see readOtherVersion()).
+struct ObjectPrint {
+    uint64_t hash = 0;
+    uint16_t id = 0;  // the object's ID: a stand-in of its kind for one that's gone
+    bool operator==(ObjectPrint const&) const = default;
+};
+constexpr char const* PRINTS_FILE = "objects.bin";
+
 struct Level {
     std::filesystem::path dir;  // empty: this level's SPs aren't saved
     uint64_t stamp = 0;         // level key and version, written into every SP file
     std::string key;
+    std::string plainKey;       // the key without the Low Detail Mode suffix, which the stamp is made of
     std::string name;
     matjson::Value info;        // as in level.json
+    std::vector<ObjectPrint> prints;  // of m_objects as the level created them (with the anticheat spike)
+    bool printsKept = false;    // in objects.bin of `dir`
 } g_level;
 
 // The open level's folder name, set before load() can give up on it (its SPs not loaded, nor saved).
@@ -156,6 +171,96 @@ uint64_t levelStamp(std::string const& key, matjson::Value const& info) {
     return hashBytes(s.data(), s.size());
 }
 
+// SPs of both read their checkpoints the same way: the same format, game and platform (the level's
+// version and objects may differ).
+bool sameGame(matjson::Value const& saved, matjson::Value const& now) {
+    if (!saved.isObject()) return false;
+    for (auto key : {"format", "game", "platform"}) {
+        if (!saved.contains(key) || saved[key] != now[key]) return false;
+    }
+    return true;
+}
+
+// The objects as the level created them, before anything moves them: kind, start position, rotation,
+// scale and flip, groups. Not a trigger's settings: one changed where it stands stays the same object, and
+// what it was doing at an SP goes on as it was, as the rest of the SP's state does.
+std::vector<ObjectPrint> printsOf(PlayLayer* pl) {
+    std::vector<ObjectPrint> out;
+    out.reserve(pl->m_objects->count());
+    for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+        uint64_t h = FNV_OFFSET;
+        auto add = [&h](auto const& value) { h = hashBytes(&value, sizeof(value), h); };
+        add(obj->m_objectID);
+        add(obj->m_startPosition.x);
+        add(obj->m_startPosition.y);
+        add(obj->m_startRotationX);
+        add(obj->m_startRotationY);
+        add(obj->m_startScaleX);
+        add(obj->m_startScaleY);
+        add(obj->m_startFlipX);
+        add(obj->m_startFlipY);
+        if (obj->m_groups) {
+            for (int i = 0; i < obj->m_groupCount && i < static_cast<int>(obj->m_groups->size()); i++) add((*obj->m_groups)[i]);
+        }
+        out.push_back({h, static_cast<uint16_t>(obj->m_objectID)});
+    }
+    return out;
+}
+
+// objects.bin: magic, count, a hash and an ID per object, and a hash of all that.
+constexpr char PRINTS_MAGIC[8] = {'S', 'P', 'C', 'O', 'B', 'J', 'S', '1'};
+constexpr size_t PRINT_SIZE = sizeof(uint64_t) + sizeof(uint16_t);
+constexpr size_t PRINTS_HEAD = sizeof(PRINTS_MAGIC) + sizeof(uint32_t);
+
+constexpr uintmax_t printsFileSize(size_t count) {
+    return PRINTS_HEAD + count * PRINT_SIZE + sizeof(uint64_t);
+}
+
+bool writePrints(std::filesystem::path const& path, std::vector<ObjectPrint> const& prints) {
+    ByteVector bytes(printsFileSize(prints.size()));
+    auto at = bytes.data();
+    auto put = [&at](void const* data, size_t size) {
+        std::memcpy(at, data, size);
+        at += size;
+    };
+    put(PRINTS_MAGIC, sizeof(PRINTS_MAGIC));
+    auto count = static_cast<uint32_t>(prints.size());
+    put(&count, sizeof(count));
+    for (auto const& p : prints) {
+        put(&p.hash, sizeof(p.hash));
+        put(&p.id, sizeof(p.id));
+    }
+    uint64_t seal = hashBytes(bytes.data(), at - bytes.data());
+    put(&seal, sizeof(seal));
+    auto res = file::writeBinarySafe(path, bytes);
+    if (res.isErr()) log::error("Can't write {}: {}", path, res.unwrapErr());
+    return res.isOk();
+}
+
+// Empty if there's no such file or it isn't whole.
+std::vector<ObjectPrint> readPrints(std::filesystem::path const& path) {
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return {};
+    auto data = file::readBinary(path);
+    if (data.isErr()) return {};
+    auto const& bytes = data.unwrap();
+    if (bytes.size() < printsFileSize(0) || std::memcmp(bytes.data(), PRINTS_MAGIC, sizeof(PRINTS_MAGIC)) != 0) return {};
+    uint32_t count = 0;
+    std::memcpy(&count, bytes.data() + sizeof(PRINTS_MAGIC), sizeof(count));
+    if (bytes.size() != printsFileSize(count)) return {};
+    uint64_t seal = 0;
+    std::memcpy(&seal, bytes.data() + bytes.size() - sizeof(seal), sizeof(seal));
+    if (seal != hashBytes(bytes.data(), bytes.size() - sizeof(seal))) return {};
+    std::vector<ObjectPrint> out(count);
+    auto at = bytes.data() + PRINTS_HEAD;
+    for (auto& p : out) {
+        std::memcpy(&p.hash, at, sizeof(p.hash));
+        std::memcpy(&p.id, at + sizeof(p.hash), sizeof(p.id));
+        at += PRINT_SIZE;
+    }
+    return out;
+}
+
 // Index of the first level object whose unique ID doesn't follow the order above, -1 if none.
 int firstObjectOutOfOrder(PlayLayer* pl) {
     auto objs = pl->m_objects;
@@ -196,6 +301,20 @@ constexpr size_t MAX_NAME_BYTES = 128;
 
 std::filesystem::path namesPath() {
     return g_level.dir / "names.json";
+}
+
+// The open level version's prints next to its SPs, once it has some: an update can move them over then.
+void keepPrints() {
+    if (g_level.printsKept || g_level.dir.empty() || g_level.prints.empty()) return;
+    auto path = g_level.dir / PRINTS_FILE;
+    // Written anew if they're another version's (or damaged): a version made of this folder takes them.
+    if (readPrints(path) == g_level.prints) {
+        g_level.printsKept = true;
+        return;
+    }
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) log::warn("{} isn't of this level version: written anew", path);
+    g_level.printsKept = writePrints(path, g_level.prints);
 }
 
 void readNames(std::vector<std::shared_ptr<StartPoint>> const& sps) {
@@ -377,8 +496,8 @@ uint64_t contentHash(ByteSpan bytes, size_t bodySize) {
     return hashBytes(bytes.data() + ID_AT + 4, bodySize - ID_AT - 4, h);
 }
 
-std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int id, size_t bodySize, std::string& error,
-    ReadError& kind) {
+std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int id, size_t bodySize, uint64_t versionStamp,
+    std::string& error, ReadError& kind) {
     unsigned int bytesRead = 0;
     FileStream in;
     if (!in.open(path, false, &bytesRead)) {
@@ -395,7 +514,7 @@ std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int 
         error = fmt::format("not an SP file of format {}", FORMAT_VERSION);
         return nullptr;
     }
-    if (stamp != g_level.stamp) {
+    if (stamp != versionStamp) {
         error = "made for another level or version";
         return nullptr;
     }
@@ -448,7 +567,9 @@ std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int 
     return sp;
 }
 
-std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, std::string& error, ReadError& kind) {
+// An SP file of the level version `versionStamp` (levelStamp()) stands for.
+std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, uint64_t versionStamp, std::string& error,
+    ReadError& kind) {
     kind = ReadError::Other;
     // PersistenceAPI checks nothing it reads, so the whole file is checked against its seal first:
     // past that it is exactly what save() wrote.
@@ -463,13 +584,228 @@ std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, st
         return nullptr;
     }
     try {
-        return readSealedSP(path, id, bodySize, error, kind);
+        return readSealedSP(path, id, bodySize, versionStamp, error, kind);
     } catch (std::exception const& e) {
         // Whole, but not what an SP file holds (an imported file can be anything).
         kind = ReadError::Damaged;
         error = fmt::format("not readable: {}", e.what());
         return nullptr;
     }
+}
+
+std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, std::string& error, ReadError& kind) {
+    return readSP(path, id, g_level.stamp, error, kind);
+}
+
+// A stand-in for a level object an update took away, of the same kind (its object ID), for while an SP of
+// the older version is read (readOtherVersion()). Outside the level: none may stay in a checkpoint.
+// Kept for as long as the game runs: released at exit, after cocos, they could crash it. Null if even a
+// block can't be made.
+GameObject* standIn(uint16_t id) {
+    static std::map<uint16_t, GameObject*> made;
+    auto& obj = made[id];
+    if (!obj) {
+        obj = GameObject::createWithKey(id);
+        if (!obj) obj = GameObject::createWithKey(1);
+        if (obj) obj->retain();
+    }
+    return obj;
+}
+
+// While an SP is read: the array in the level's m_objects. PersistenceAPI saves a reference to an object
+// as its index and turns it back with m_objects->objectAtIndex(index), checking nothing, which the hook
+// catches for this array. An index past the array gets a stand-in instead of memory past it; and an array
+// made of the open level version's objects in another version's order (readOtherVersion()) gives an SP of
+// that version the same objects in this one.
+struct Remap {
+    CCArray* array = nullptr;
+    std::vector<bool> standing;                 // by index: a stand-in is there
+    unsigned int objects = 0;                   // the level's objects in it (not the mod's own after them)
+    int standIns = 0;                           // references to stand-ins
+    int outside = 0;                            // references past the level's objects
+    std::vector<unsigned int>* seen = nullptr;  // smoke test: every index asked for
+} g_remap;
+
+CCObject* remapObjectAtIndex(CCArray* self, unsigned int index) {
+    // Called from the hook, this goes on to the game's own.
+    if (self != g_remap.array) return self->objectAtIndex(index);
+    if (g_remap.seen) g_remap.seen->push_back(index);
+    if (index >= g_remap.objects) {
+        g_remap.outside++;
+        // Something to read into: the SP doesn't get used.
+        if (auto obj = standIn(1)) return obj;
+        return self->count() > 0 ? self->objectAtIndex(0) : nullptr;
+    }
+    if (index < g_remap.standing.size() && g_remap.standing[index]) g_remap.standIns++;
+    return self->objectAtIndex(index);
+}
+
+Hook* g_remapHook = nullptr;
+
+// Off but while it's needed: the game asks arrays for objects all the time.
+$execute {
+    auto cocos = GetModuleHandleW(L"libcocos2d.dll");
+    auto address = cocos ? GetProcAddress(cocos, "?objectAtIndex@CCArray@cocos2d@@QEAAPEAVCCObject@2@I@Z") : nullptr;
+    if (!address) return log::error("CCArray::objectAtIndex not found: SPs can't be moved over to a new level version");
+    auto hook = Hook::create(reinterpret_cast<void*>(address), &remapObjectAtIndex, "cocos2d::CCArray::objectAtIndex",
+        tulip::hook::TulipConvention::Default);
+    hook->setAutoEnable(false);
+    auto claimed = Mod::get()->claimHook(std::move(hook));
+    if (claimed.isErr()) return log::error("Can't hook CCArray::objectAtIndex: {}", claimed.unwrapErr());
+    g_remapHook = claimed.unwrap();
+}
+
+// `array` in the level's m_objects, the hook on, for as long as it lives. Without the hook SPs are read
+// as before: unchecked, and none moved over.
+class RemapOn {
+    PlayLayer* m_pl;
+    CCArray* m_objects;
+    bool m_on = false;
+
+public:
+    RemapOn(PlayLayer* pl, CCArray* array, std::vector<bool> standing = {}) : m_pl(pl), m_objects(pl->m_objects) {
+        if (!g_remapHook) return;
+        if (auto res = g_remapHook->enable(); res.isErr()) {
+            log::error("Can't turn the CCArray::objectAtIndex hook on: {}", res.unwrapErr());
+            return;
+        }
+        m_on = true;
+        g_remap.array = array;
+        g_remap.standing = std::move(standing);
+        // The level's own: the mod's objects after them (SPs' startposes) are made anew each time.
+        g_remap.objects = array == pl->m_objects && !g_level.prints.empty() ? static_cast<unsigned int>(g_level.prints.size())
+                                                                             : array->count();
+        pl->m_objects = array;
+    }
+    ~RemapOn() {
+        if (!m_on) return;
+        m_pl->m_objects = m_objects;
+        g_remap = {};
+        if (auto res = g_remapHook->disable(); res.isErr()) log::error("Can't turn the CCArray::objectAtIndex hook off: {}", res.unwrapErr());
+    }
+    explicit operator bool() const {
+        return m_on;
+    }
+};
+
+// What the checkpoint keeps of objects the update took away: where their groups moved them, whether they
+// were used, their animation. The objects being gone, so is that (the game would move the stand-ins
+// between the level's sections, which they aren't in). The number of entries dropped.
+int dropStandIns(CheckpointObject* cp, std::set<GameObject*> const& standIns) {
+    int dropped = 0;
+    auto drop = [&](auto& states) {
+        dropped += static_cast<int>(std::erase_if(states, [&](auto const& s) { return standIns.contains(s.m_gameObject); }));
+    };
+    drop(cp->m_vectorSavedObjectStateRef);
+    drop(cp->m_vectorActiveSaveObjectState);
+    drop(cp->m_vectorSpecialSaveObjectState);
+    return dropped;
+}
+
+// The percent in an SP file as written, NaN if it can't be read: for telling the player which SP it was.
+float percentIn(std::filesystem::path const& path) {
+    float percent = NAN;
+    auto bytes = file::readBinary(path);
+    if (bytes.isOk() && bytes.unwrap().size() >= PERCENT_AT + sizeof(percent)) {
+        std::memcpy(&percent, bytes.unwrap().data() + PERCENT_AT, sizeof(percent));
+    }
+    return percent;
+}
+
+// Lowest first, unknown ones (NaN) last.
+void sortPercents(std::vector<float>& percents) {
+    std::sort(percents.begin(), percents.end(), [](float a, float b) { return !std::isnan(a) && (std::isnan(b) || a < b); });
+}
+
+struct OtherVersion {
+    bool known = false;  // its objects are known, and its checkpoints read like the open version's: SPs can move
+    std::vector<std::shared_ptr<StartPoint>> sps;  // moved over: with the open version's objects, ids as there
+    std::vector<float> notMoved;                   // percents of the others (NaN: unknown), lowest first
+};
+
+// SPs of `dir`, a version of the open level made for another level version, each read with the objects it
+// refers to found among the open version's by their prints. What it keeps of objects the update took away
+// (or changed) goes; one that needs such an object in any other way (a trigger it was in the middle of,
+// say) isn't moved over.
+OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
+    OtherVersion out;
+    auto info = file::readJson(dir / "level.json");
+    if (!g_remapHook || g_level.prints.empty() || info.isErr() || !sameGame(info.unwrap(), g_level.info)) return out;
+    auto old = readPrints(dir / PRINTS_FILE);
+    if (old.empty() || static_cast<int64_t>(old.size()) != info.unwrap()["objects"].asInt().unwrapOr(-1)) return out;
+
+    // The same print, the same object; objects alike (on top of each other) pair up in order.
+    std::unordered_map<uint64_t, std::vector<unsigned int>> where;
+    for (unsigned int i = 0; i < g_level.prints.size(); i++) where[g_level.prints[i].hash].push_back(i);
+    std::unordered_map<uint64_t, size_t> taken;
+    Ref<CCArray> array = CCArray::createWithCapacity(static_cast<unsigned int>(old.size()));
+    std::vector<bool> standing(old.size());
+    std::set<GameObject*> standIns;
+    size_t found = 0;
+    for (size_t i = 0; i < old.size(); i++) {
+        auto it = where.find(old[i].hash);
+        auto& next = taken[old[i].hash];
+        if (it != where.end() && next < it->second.size() && g_level.prints[it->second[next]].id == old[i].id) {
+            array->addObject(pl->m_objects->objectAtIndex(it->second[next++]));
+            found++;
+            continue;
+        }
+        auto obj = standIn(old[i].id);
+        if (!obj) return out;
+        array->addObject(obj);
+        standIns.insert(obj);
+        standing[i] = true;
+    }
+    log::info("{}: {} of the {} objects of {} are in this version", g_level.key, found, old.size(), dir.filename());
+
+    std::vector<std::pair<int, std::filesystem::path>> files;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (int id = idFromName(it->path()); id > 0) files.push_back({id, it->path()});
+    }
+    std::sort(files.begin(), files.end());
+    auto names = file::readJson(dir / "names.json").unwrapOr(matjson::Value::object());
+    if (!names.isObject()) names = matjson::Value::object();
+    uint64_t stamp = levelStamp(g_level.plainKey, info.unwrap());
+    RemapOn on(pl, array, std::move(standing));
+    if (!on) return out;
+    out.known = true;
+    for (auto const& [id, path] : files) {
+        g_remap.standIns = g_remap.outside = 0;
+        std::string error;
+        ReadError kind;
+        auto sp = readSP(path, id, stamp, error, kind);
+        // Each reference read is one object asked for: all of those to stand-ins have to be among the
+        // object states, which go.
+        int dropped = sp ? dropStandIns(sp->cp, standIns) : 0;
+        if (sp && g_remap.outside == 0 && dropped == g_remap.standIns) {
+            auto name = names[fmt::to_string(id)].asString().unwrapOr("");
+            if (name.size() <= MAX_NAME_BYTES) sp->name = std::move(name);
+            log::info("SP file {} of {} moved over ({} states of objects gone dropped)", path.filename(), dir.filename(), dropped);
+            out.sps.push_back(sp);
+            continue;
+        }
+        log::info("SP file {} of {} not moved over: {}", path.filename(), dir.filename(),
+            sp ? fmt::format("{} references to objects gone, {} of them object states; {} past the level", g_remap.standIns,
+                     dropped, g_remap.outside)
+               : error);
+        float percent = sp ? sp->percent : percentIn(path);
+        out.notMoved.push_back(percent);
+    }
+    sortPercents(out.notMoved);
+    log::info("{}: {} SPs of {} moved over, {} not", g_level.key, out.sps.size(), dir.filename(), files.size() - out.sps.size());
+    return out;
+}
+
+// Could readOtherVersion() move SPs of `dir` over, as far as can be told without reading them?
+bool canMoveOver(std::filesystem::path const& dir) {
+    if (!g_remapHook || g_level.prints.empty()) return false;
+    auto info = file::readJson(dir / "level.json");
+    if (info.isErr() || !sameGame(info.unwrap(), g_level.info)) return false;
+    auto count = info.unwrap()["objects"].asInt().unwrapOr(-1);
+    std::error_code ec;
+    auto size = std::filesystem::file_size(dir / PRINTS_FILE, ec);
+    return !ec && count >= 0 && size == printsFileSize(static_cast<size_t>(count));
 }
 
 // SPs placed with Low Detail Mode on before each mode had its own folder are in the plain one: they go
@@ -646,6 +982,7 @@ Loaded load(PlayLayer* pl) {
     }
     auto infoPath = dir / "level.json";
     std::error_code ec;
+    std::filesystem::path oldVersion;  // the SPs of another version of the level, set aside in it
     if (std::filesystem::exists(infoPath, ec)) {
         auto saved = file::readJson(infoPath);
         if ((saved.isErr() || !sameLevel(saved.unwrap(), info)) && !hasSPFiles(dir)) {
@@ -656,6 +993,7 @@ Loaded load(PlayLayer* pl) {
                 return out;
             }
             std::filesystem::remove(dir / "names.json", ec);
+            std::filesystem::remove(dir / PRINTS_FILE, ec);
             log::info("{} changed since it was last played, it had no SPs", key);
         }
         else if (saved.isErr() || !sameLevel(saved.unwrap(), info)) {
@@ -671,6 +1009,7 @@ Loaded load(PlayLayer* pl) {
                 return out;
             }
             out.notice = Notice::LevelChanged;
+            oldVersion = aside;
         }
     }
     std::filesystem::create_directories(dir, ec);
@@ -686,8 +1025,24 @@ Loaded load(PlayLayer* pl) {
     // carry that stamp. The number of objects tells the modes apart all the same.
     g_level.stamp = levelStamp(plainKey, info);
     g_level.key = key;
+    g_level.plainKey = plainKey;
     g_level.name = pl->m_level->m_levelName;
     g_level.info = info;
+    g_level.prints = printsOf(pl);
+    g_level.printsKept = false;
+
+    if (!oldVersion.empty()) {
+        // An update: the SPs that can be are moved over, keeping their ids and names, and load as the rest.
+        auto other = readOtherVersion(pl, oldVersion);
+        out.movedOver = other.known;
+        // Moved over: those that load below (`moved`).
+        for (auto const& sp : other.sps) {
+            if (!save(*sp)) other.notMoved.push_back(sp->percent);
+        }
+        if (!other.sps.empty()) saveNames(other.sps);
+        sortPercents(other.notMoved);
+        out.notMoved = std::move(other.notMoved);
+    }
 
     auto start = std::chrono::steady_clock::now();
     int failed = 0;
@@ -696,6 +1051,9 @@ Loaded load(PlayLayer* pl) {
          it.increment(ec)) {
         files.push_back(it->path());
     }
+    // Checked: an SP referring past the level's objects would read memory past them.
+    std::optional<RemapOn> checked;
+    checked.emplace(pl, pl->m_objects);
     for (auto const& path : files) {
         if (path.extension() == ".tmp") {
             std::filesystem::remove(path, ec);  // left by a crash while saving
@@ -706,9 +1064,18 @@ Loaded load(PlayLayer* pl) {
         out.nextId = std::max(out.nextId, id + 1);
         std::string error;
         ReadError kind;
+        g_remap.outside = 0;
         auto sp = readSP(path, id, error, kind);
+        if (sp && g_remap.outside > 0) {
+            // Kept where it is: whole, so not damaged, only not for these objects.
+            error = fmt::format("its checkpoint refers to {} objects past the level's", g_remap.outside);
+            kind = ReadError::Other;
+            sp = nullptr;
+        }
         if (!sp) {
             failed++;
+            // In the folder of an update there are only the SPs moved over: one more not moved.
+            if (out.movedOver) out.notMoved.push_back(percentIn(path));
             log::error("SP file {} of {} not loaded: {}", path.filename(), key, error);
             if (kind == ReadError::Damaged) {
                 // Kept for a look, but out of the way so the warning doesn't come back every time.
@@ -720,12 +1087,19 @@ Loaded load(PlayLayer* pl) {
         }
         out.sps.push_back(sp);
     }
+    checked.reset();
     std::sort(out.sps.begin(), out.sps.end(), [](auto const& a, auto const& b) { return a->x < b->x; });
     readNames(out.sps);
+    if (!out.sps.empty()) keepPrints();
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     log::info("{}: {} SPs loaded in {:.1f} ms, {} failed", key, out.sps.size(), ms, failed);
     out.failed = failed;
-    if (failed > 0) out.notice = Notice::Failed;
+    if (out.movedOver) {
+        out.moved = static_cast<int>(out.sps.size());
+        sortPercents(out.notMoved);
+    }
+    // After an update, those that didn't load are among the ones not moved over.
+    if (failed > 0 && !out.movedOver) out.notice = Notice::Failed;
     else if (!out.sps.empty() && out.notice == Notice::None) out.notice = Notice::Loaded;
     else if (out.sps.empty() && out.notice == Notice::None && pl->m_level->m_lowDetailMode) {
         // The player's SPs may be in the other mode's folder.
@@ -737,10 +1111,10 @@ Loaded load(PlayLayer* pl) {
     return out;
 }
 
-bool save(StartPoint const& sp) {
-    if (g_level.dir.empty() || !sp.cp || !sp.cp->m_player1Checkpoint) return false;
-    auto start = std::chrono::steady_clock::now();
-    auto path = spPath(sp.id);
+namespace {
+
+// The SP's file at `path`, whole or not at all.
+bool writeSPFile(StartPoint const& sp, std::filesystem::path const& path) {
     auto temp = path;
     temp += ".tmp";
     std::error_code ec;
@@ -771,8 +1145,31 @@ bool save(StartPoint const& sp) {
     // Written in full, then put in place: a crash while saving leaves no damaged SP behind.
     std::filesystem::rename(temp, path, ec);
     if (ec) return fail(ec.message());
+    return true;
+}
+
+// The SP's file as save() would write it, for the open level version.
+Result<ByteVector> fileFor(StartPoint const& sp) {
+    // .tmp: load() deletes it if a crash leaves it.
+    auto path = g_level.dir / fmt::format("moving-{}.tmp", sp.id);
+    if (!writeSPFile(sp, path)) return Err("can't write it");
+    auto bytes = file::readBinary(path);
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    return bytes;
+}
+
+}
+
+bool save(StartPoint const& sp) {
+    if (g_level.dir.empty() || !sp.cp || !sp.cp->m_player1Checkpoint) return false;
+    auto start = std::chrono::steady_clock::now();
+    auto path = spPath(sp.id);
+    if (!writeSPFile(sp, path)) return false;
+    std::error_code ec;
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     log::info("SP {} saved: {} KB in {:.1f} ms", sp.id, std::filesystem::file_size(path, ec) / 1024, ms);
+    keepPrints();
     return true;
 }
 
@@ -860,7 +1257,14 @@ std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files,
             error = written.unwrapErr();
         } else {
             ReadError kind;
+            std::optional<RemapOn> checked;
+            if (auto pl = PlayLayer::get()) checked.emplace(pl, pl->m_objects);
+            g_remap.outside = 0;
             sp = readSP(temp, id, error, kind);
+            if (sp && g_remap.outside > 0) {
+                error = fmt::format("its checkpoint refers to {} objects past the level's", g_remap.outside);
+                sp = nullptr;
+            }
             if (sp) {
                 std::filesystem::rename(temp, path, ec);
                 if (ec) {
@@ -874,6 +1278,7 @@ std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files,
             std::filesystem::remove(temp, ec);
         } else {
             log::info("Imported SP added as SP {} at x {:.1f} ({:.2f}%)", id, sp->x, sp->percent);
+            keepPrints();
         }
         added.push_back(sp);
     }
@@ -939,6 +1344,15 @@ Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps) {
         std::filesystem::remove_all(aside, ec);
         return out;
     }
+    // Its prints, for an update to move its SPs over: the same file (a link takes no space; a copy if
+    // links can't be made). Rewritten later, the level's goes to a file of its own (writeBinarySafe).
+    keepPrints();
+    if (g_level.printsKept) {
+        std::error_code linked;
+        std::filesystem::create_hard_link(g_level.dir / PRINTS_FILE, aside / PRINTS_FILE, linked);
+        if (linked) std::filesystem::copy_file(g_level.dir / PRINTS_FILE, aside / PRINTS_FILE, linked);
+        if (linked) log::warn("Can't put the level's prints into {}: {}", aside, linked.message());
+    }
     auto names = matjson::Value::object();
     for (auto const& sp : sps) {
         std::filesystem::rename(spPath(sp->id), aside / spPath(sp->id).filename(), ec);
@@ -963,7 +1377,66 @@ std::vector<Version> versions() {
     if (g_level.dir.empty()) return {};
     auto all = versionsOf(g_level.dir, g_level.info);
     std::erase_if(all, [](Version const& v) { return v.sps == 0; });
+    for (auto& v : all) v.movable = !v.fits && canMoveOver(v.dir);
     return all;
+}
+
+Result<MovedVersion> moveVersion(Version const& version) {
+    auto pl = PlayLayer::get();
+    if (!pl || !isVersionOfLevel(version.dir)) return Err("not a version of this level");
+    if (version.fits) return Err("made for this level version");
+    auto other = readOtherVersion(pl, version.dir);
+    if (!other.known) return Err("its objects aren't known");
+    MovedVersion out;
+    out.notMoved = std::move(other.notMoved);
+    for (auto const& sp : other.sps) {
+        auto file = fileFor(*sp);
+        if (file.isErr()) {
+            out.notMoved.push_back(sp->percent);
+            continue;
+        }
+        out.sps.push_back({std::move(file).unwrap(), sp->name});
+    }
+    sortPercents(out.notMoved);
+    return Ok(std::move(out));
+}
+
+std::vector<References> referencesOfSPs() {
+    std::vector<References> out;
+    auto pl = PlayLayer::get();
+    if (!pl || g_level.dir.empty()) return out;
+    std::vector<std::pair<int, std::filesystem::path>> files;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(g_level.dir, ec); !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+        if (int id = idFromName(it->path()); id > 0) files.push_back({id, it->path()});
+    }
+    std::sort(files.begin(), files.end());
+    for (auto const& [id, path] : files) {
+        References refs{id};
+        std::shared_ptr<StartPoint> sp;
+        {
+            RemapOn on(pl, pl->m_objects);
+            if (!on) return out;
+            g_remap.seen = &refs.all;
+            std::string error;
+            ReadError kind;
+            sp = readSP(path, id, error, kind);
+            if (!sp) log::warn("Smoke test: SP file {}: {}", path.filename(), error);
+        }
+        auto index = [](GameObject* obj) { return static_cast<unsigned int>(obj->m_uniqueID - FIRST_OBJECT_ID); };
+        if (sp) {
+            for (auto const& s : sp->cp->m_vectorSavedObjectStateRef) refs.states.push_back(index(s.m_gameObject));
+            for (auto const& s : sp->cp->m_vectorActiveSaveObjectState) refs.states.push_back(index(s.m_gameObject));
+            for (auto const& s : sp->cp->m_vectorSpecialSaveObjectState) refs.states.push_back(index(s.m_gameObject));
+        }
+        for (auto* list : {&refs.all, &refs.states}) {
+            std::sort(list->begin(), list->end());
+            list->erase(std::unique(list->begin(), list->end()), list->end());
+        }
+        out.push_back(std::move(refs));
+    }
+    return out;
 }
 
 Result<std::vector<VersionSP>> readVersion(Version const& version) {
@@ -1045,7 +1518,10 @@ bool onlyModFiles(std::filesystem::path const& dir) {
     if (ec) return false;
     for (; !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
         auto name = nameOf(it->path());
-        if (name == "level.json" || name == "names.json" || name == VERSION_FILE || it->path().extension() == ".tmp") continue;
+        if (name == "level.json" || name == "names.json" || name == VERSION_FILE || name == PRINTS_FILE ||
+            it->path().extension() == ".tmp") {
+            continue;
+        }
         return false;
     }
     return !ec;

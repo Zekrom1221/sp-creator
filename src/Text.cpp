@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 
 using namespace geode::prelude;
 
@@ -92,6 +93,13 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"This version can't be read", "Эту версию не получилось прочитать"},
     {"Rename version", "Переименовать версию"},
     {"Couldn't rename the version", "Не получилось переименовать версию"},
+    {"Level updated: SPs moved over: {}", "Уровень обновился: перенесено SP: {}"},
+    {"not moved {}: {}", "не получилось {}: {}"},
+    {"Move over", "Перенести"},
+    {"for another level version", "для другой версии уровня"},
+    {"Moved over to this level version: {}", "Перенесено на эту версию уровня: {}"},
+    {"None of these SPs can be moved over ({}): the update took away objects they need",
+        "Эти SP не получилось перенести ({}): обновление убрало нужные им объекты"},
     {"SP storage", "Хранилище SP"},
     {"Levels: {}, {} in all", "Уровней: {}, всего {}"},
     {"No SPs saved yet", "Сохранённых SP пока нет"},
@@ -144,6 +152,16 @@ std::string size(uintmax_t bytes) {
     constexpr uintmax_t MB = 1024 * 1024;
     if (bytes < MB) return format(Msg::Kilobytes, (bytes + 1023) / 1024);
     return format(Msg::Megabytes, static_cast<double>(bytes) / MB);
+}
+
+std::string percents(std::vector<float> const& percents) {
+    constexpr size_t SHOWN = 5;
+    std::vector<std::string> parts;
+    for (size_t i = 0; i < percents.size() && i < SHOWN; i++) {
+        parts.push_back(std::isfinite(percents[i]) ? fmt::format("{}%", static_cast<int>(percents[i])) : "?");
+    }
+    if (percents.size() > SHOWN) parts.push_back("...");
+    return fmt::format("{}", fmt::join(parts, ", "));
 }
 
 std::string date(std::time_t time) {

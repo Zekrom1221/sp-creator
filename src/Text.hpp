@@ -5,6 +5,7 @@
 #include <ctime>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // What the mod says to the player, in English or Russian. The game's fonts have no Cyrillic letters,
 // so Russian text uses the mod's own font (Ubuntu Bold, built by the Geode CLI from mod.json).
@@ -87,6 +88,13 @@ namespace text {
         VersionUnreadable,
         RenameVersion,
         VersionNotRenamed,
+        // Moving SPs over to a new level version.
+        LevelUpdated,     // {moved}
+        NotMoved,         // {count} {percents}
+        MoveOver,
+        VersionMovable,
+        VersionMovedOver, // {count}
+        NoneMoved,        // {percents}
         // The storage manager.
         StorageTitle,
         StorageTotal,     // {levels} {size}
@@ -120,6 +128,8 @@ namespace text {
     // "1.7 MB", "120 KB"; "2026-10-28 14:05" (in Russian "28.10.2026 14:05"), local time.
     std::string size(uintmax_t bytes);
     std::string date(std::time_t time);
+    // Where SPs are: "12%, 40%, 81%", the first few and "..." for the rest; NaN: "?".
+    std::string percents(std::vector<float> const& percents);
 
     // Fonts for text that may be in Russian (or in a name the player typed).
     char const* font();       // instead of bigFont.fnt

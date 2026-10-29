@@ -326,19 +326,36 @@ Result<Pack> open(std::filesystem::path const& path) {
 }
 
 Result<Pack> openVersion(storage::Version const& version) {
-    auto read = storage::readVersion(version);
-    if (read.isErr()) {
-        log::error("Version {}: {}", version.dir, read.unwrapErr());
-        return fail(version.fits ? Msg::VersionUnreadable : Msg::OtherVersion);
+    std::vector<storage::VersionSP> sps;
+    std::vector<float> notMoved;
+    if (!version.fits && version.movable) {
+        auto moved = storage::moveVersion(version);
+        if (moved.isErr()) {
+            log::error("Version {}: {}", version.dir, moved.unwrapErr());
+            return fail(Msg::OtherVersion);
+        }
+        sps = std::move(moved.unwrap().sps);
+        notMoved = std::move(moved.unwrap().notMoved);
+        if (sps.empty()) return Err(text::format(Msg::NoneMoved, text::percents(notMoved)));
+    }
+    else {
+        auto read = storage::readVersion(version);
+        if (read.isErr()) {
+            log::error("Version {}: {}", version.dir, read.unwrapErr());
+            return fail(version.fits ? Msg::VersionUnreadable : Msg::OtherVersion);
+        }
+        sps = std::move(read).unwrap();
     }
     std::vector<ByteVector> files;
     std::vector<std::string> names;
-    for (auto& sp : read.unwrap()) {
+    for (auto& sp : sps) {
         files.push_back(std::move(sp.file));
         names.push_back(std::move(sp.name));
     }
     auto pack = collect(files, names, utils::string::pathToString(version.dir));
     if (pack.items.empty()) return fail(Msg::VersionUnreadable);
+    pack.movedOver = !version.fits;
+    pack.notMoved = std::move(notMoved);
     return Ok(std::move(pack));
 }
 

@@ -24,6 +24,9 @@ from people you trust.
 Open one to bring its SPs back, rename it, or delete the ones you don't need: nothing is deleted on its own.
 SPs that a version holds already aren't saved twice: that version moves to the top instead.
 
+When a level is updated, your SPs are moved over to the new version. One that depends on objects the update
+took away stays in <cy>Versions</c> only: the message says where it was, so you can place it again.
+
 <cy>SP storage</c> in the mod's settings lists the SPs and versions of all levels, the biggest first. Pick levels,
 or SPs and versions of one level, and delete them to free up space.
 

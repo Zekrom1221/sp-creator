@@ -11,7 +11,8 @@
 
 // Saving SPs between sessions. <mod save dir>/<root>/<level key>/ ("online-<ID>", "-ldm" added for Low
 // Detail Mode) holds level.json (the level version
-// the SPs belong to), names.json (the names players gave them) and one sp-<id>.spc file per SP: its
+// the SPs belong to), names.json (the names players gave them), objects.bin (prints of the version's
+// objects, to move the SPs over when the level is updated) and one sp-<id>.spc file per SP: its
 // auto part and its checkpoint, the checkpoint written with PersistenceAPI in the field order Practice
 // Checkpoint Permanence uses.
 namespace storage {
@@ -20,7 +21,7 @@ namespace storage {
         None,
         Loaded,         // `sps` loaded
         Failed,         // `failed` SPs couldn't be loaded
-        LevelChanged,   // the SPs were made for another version of the level and set aside
+        LevelChanged,   // the SPs were made for another version of the level and set aside (`movedOver`)
         CantSave,       // SPs of this level can't be saved
         CantMoveAside,  // SPs of another version couldn't be set aside: SPs are off in this level
         // None here, but some placed with Low Detail Mode on / off, which only fit that mode.
@@ -33,6 +34,11 @@ namespace storage {
         int nextId = 1;                                // above every SP file of the level, loaded or not
         Notice notice = Notice::None;
         int failed = 0;
+        // With LevelChanged: the set aside SPs could be moved over to this version (their objects were
+        // known), `moved` of them were (loaded: `sps`); `notMoved` holds the others' percents (NaN: unknown).
+        bool movedOver = false;
+        int moved = 0;
+        std::vector<float> notMoved;
     };
 
     // Folder under the mod save dir (UTF-8, "levels"); the smoke test keeps its SPs apart.
@@ -97,6 +103,7 @@ namespace storage {
         int sps = 0;
         uintmax_t bytes = 0;    // all its files
         bool fits = false;      // made for the open level's version: can be brought back
+        bool movable = false;   // made for another, but its SPs can be moved over (moveVersion)
         std::string name;       // given by the player; empty: none
     };
     // The open level's versions that hold SPs, newest first.
@@ -107,6 +114,20 @@ namespace storage {
     };
     // A version's SP files (to pass through readHeader), with their names. Only of a version that fits.
     geode::Result<std::vector<VersionSP>> readVersion(Version const& version);
+    struct MovedVersion {
+        std::vector<VersionSP> sps;    // for the open level version, as readVersion gives them
+        std::vector<float> notMoved;   // percents of those that refer to objects the update took away
+    };
+    // A version for another level version (`movable`): its SPs read with the objects they refer to found
+    // among the open version's, by the prints saved with them.
+    geode::Result<MovedVersion> moveVersion(Version const& version);
+    // Smoke test: the objects (indices in m_objects) the checkpoint of each SP of the open level refers to.
+    struct References {
+        int id = 0;
+        std::vector<unsigned int> all;
+        std::vector<unsigned int> states;  // those with an object state (moved, used, animated) among them
+    };
+    std::vector<References> referencesOfSPs();
     bool removeVersion(Version const& version);
     // An empty name takes the version's name away.
     bool renameVersion(Version const& version, std::string const& name);
