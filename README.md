@@ -48,8 +48,9 @@ Only classic levels: platformer levels have no SPs.
   the SPs of such a file to the level, or puts them in place of yours (yours are saved as a version or
   deleted, as you choose). Import files only from people you trust. A `.spcreator` file is only data: a file
   that asks to be run, or comes as an `.exe`, is not one.
-- **Versions** in the SP list holds the SPs put aside: when replaced by an import, or when the level was
-  updated. Open one to bring its SPs back, rename it, or delete it. Nothing is deleted on its own.
+- **Versions** in the SP list holds the SPs put aside: when replaced by an import, deleted with **Save and
+  delete**, or when the level was updated. Open one to bring its SPs back, rename it, or delete it. Nothing is
+  deleted on its own.
 - **Level updates.** When a level is updated, your SPs are moved over to the new version. One that depends
   on objects the update took away stays in **Versions** only: the message says where it was, so you can place
   it again. This is for online levels: when you edit your own level, its SPs aren't moved over, and it starts
@@ -88,6 +89,8 @@ cmake --build build
 
 ## License
 
-[GPLv3](LICENSE). The mod saves SPs with [PersistenceAPI](https://github.com/0x5abe/PersistenceAPI) (GPLv3)
+Copyright (C) 2026 Zekrom. SP Creator is free software under the GNU GPL v3: see [LICENSE](LICENSE).
+
+The mod saves SPs with [PersistenceAPI](https://github.com/0x5abe/PersistenceAPI) (GPLv3)
 and compresses them with [zlib](https://zlib.net) (zlib License).
 Its font is Ubuntu Bold, under the [Ubuntu Font Licence](resources/fonts/UFL.txt).
