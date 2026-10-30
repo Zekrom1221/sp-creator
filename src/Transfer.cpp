@@ -12,6 +12,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,8 +31,8 @@ constexpr int PACK_FORMAT = 1;
 constexpr size_t MAX_PACK_SIZE = 128 * 1024 * 1024;
 constexpr size_t MAX_MANIFEST_SIZE = 1024 * 1024;
 constexpr size_t MAX_SP_FILE_SIZE = 32 * 1024 * 1024;
-// Unpacked: far above what SP files take (1000 SPs from late in BPATA, 800 MB). SP files are compressed, and
-// unpacking more than that from a file someone sent would hold the game up for long.
+// Unpacked: far above what a pack's SP files take (1000 SPs from late in BPATA, 800 MB; a pack this size holds
+// some 400 MB). SP files are compressed, and unpacking more from a file someone sent would hold the game up for long.
 constexpr uint64_t MAX_UNPACKED = 1024ull * 1024 * 1024;
 constexpr size_t MAX_ITEMS = 1000;
 constexpr size_t MAX_NAME_BYTES = 128;
@@ -186,8 +187,10 @@ Result<> checkLevel(matjson::Value const& level, storage::LevelInfo const& open)
     return Ok();
 }
 
-// The items of SP files (with their names) for the open level, against its SPs; `from` for the log.
-transfer::Pack collect(std::vector<ByteVector>& files, std::vector<std::string> const& names, std::string const& from) {
+// The items of SP files (with their names) for the open level, against its SPs; `from` for the log. Those past
+// `maxUnpacked` (unpacked, see storage::unpackedSize) aren't read: they count as damaged.
+transfer::Pack collect(std::vector<ByteVector>& files, std::vector<std::string> const& names, std::string const& from,
+    uint64_t maxUnpacked) {
     auto const& own = core::sps();
     // The level's SPs by content, to see which the file holds; all of them on disk first.
     core::saveAll();
@@ -200,8 +203,8 @@ transfer::Pack collect(std::vector<ByteVector>& files, std::vector<std::string> 
     uint64_t unpacked = 0;
     for (size_t f = 0; f < files.size(); f++) {
         unpacked += storage::unpackedSize(files[f]);
-        auto header = unpacked <= MAX_UNPACKED ? storage::readHeader(files[f])
-                                               : Result<storage::Header>(Err("past what the SPs of a file may unpack to"));
+        auto header = unpacked <= maxUnpacked ? storage::readHeader(files[f])
+                                              : Result<storage::Header>(Err("past what the SPs of a file may unpack to"));
         if (header.isErr()) {
             log::warn("Import: SP {} of {}: {}", f + 1, from, header.unwrapErr());
             pack.damaged++;
@@ -347,7 +350,7 @@ Result<Pack> open(std::filesystem::path const& path) {
         if (!list.isArray() || list.size() != files.size()) return fail(Msg::PackDamaged);
         std::vector<std::string> names;
         for (size_t f = 0; f < files.size(); f++) names.push_back(list[f]["name"].asString().unwrapOr(""));
-        auto pack = collect(files, names, utils::string::pathToString(path));
+        auto pack = collect(files, names, utils::string::pathToString(path), MAX_UNPACKED);
         if (pack.items.empty()) return fail(Msg::PackDamaged);
         return Ok(std::move(pack));
     } catch (std::exception const& e) {
@@ -383,7 +386,8 @@ Result<Pack> openVersion(storage::Version const& version) {
         files.push_back(std::move(sp.file));
         names.push_back(std::move(sp.name));
     }
-    auto pack = collect(files, names, utils::string::pathToString(version.dir));
+    // The player's own: as many as it holds.
+    auto pack = collect(files, names, utils::string::pathToString(version.dir), std::numeric_limits<uint64_t>::max());
     if (pack.items.empty()) return fail(Msg::VersionUnreadable);
     pack.movedOver = !version.fits;
     pack.notMoved = std::move(notMoved);
