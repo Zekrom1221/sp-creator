@@ -30,6 +30,9 @@ constexpr int PACK_FORMAT = 1;
 constexpr size_t MAX_PACK_SIZE = 128 * 1024 * 1024;
 constexpr size_t MAX_MANIFEST_SIZE = 1024 * 1024;
 constexpr size_t MAX_SP_FILE_SIZE = 32 * 1024 * 1024;
+// Unpacked: far above what SP files take (1000 SPs from late in BPATA, 800 MB). SP files are compressed, and
+// unpacking more than that from a file someone sent would hold the game up for long.
+constexpr uint64_t MAX_UNPACKED = 1024ull * 1024 * 1024;
 constexpr size_t MAX_ITEMS = 1000;
 constexpr size_t MAX_NAME_BYTES = 128;
 // An imported SP this close to one of the level's is pointed out: the player may want only one of them.
@@ -194,8 +197,11 @@ transfer::Pack collect(std::vector<ByteVector>& files, std::vector<std::string> 
     }
     std::unordered_set<uint64_t> seen;
     transfer::Pack pack;
+    uint64_t unpacked = 0;
     for (size_t f = 0; f < files.size(); f++) {
-        auto header = storage::readHeader(files[f]);
+        unpacked += storage::unpackedSize(files[f]);
+        auto header = unpacked <= MAX_UNPACKED ? storage::readHeader(files[f])
+                                               : Result<storage::Header>(Err("past what the SPs of a file may unpack to"));
         if (header.isErr()) {
             log::warn("Import: SP {} of {}: {}", f + 1, from, header.unwrapErr());
             pack.damaged++;

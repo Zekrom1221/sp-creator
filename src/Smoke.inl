@@ -15,6 +15,7 @@
 #include "SPList.hpp"
 #include "Transfer.hpp"
 
+#include <fstream>
 #include <set>
 
 namespace {
@@ -581,6 +582,22 @@ void smokeTransfer() {
     });
     variant("an SP more than pack.json lists", [](transfer::Raw& r) {
         if (!r.files.empty()) r.files.push_back(r.files[0]);
+    });
+    // Whole, but the compressed SP file inside isn't right; and one SP as a file of before compression, the same.
+    for (auto how : {"garbled", "cut", "trailing", "bigger", "smaller", "huge", "dense", "bomb", "older", "flat"}) {
+        variant(fmt::format("one SP file {}", how), [how](transfer::Raw& r) {
+            if (!r.files.empty()) r.files[0] = storage::variantOf(r.files[0], how);
+        });
+    }
+    // More than a pack's SPs may unpack to: those past it aren't unpacked.
+    variant("40 SP files unpacking to 32 MB each", [](transfer::Raw& r) {
+        if (r.files.empty()) return;
+        auto noise = storage::variantOf(r.files[0], "noise");
+        auto entry = r.manifest["sps"][0];
+        r.files.assign(40, noise);
+        auto list = matjson::Value::array();
+        for (int i = 0; i < 40; i++) list.push(entry);
+        r.manifest["sps"] = list;
     });
     for (auto [what, keep] : {std::pair{"cut off", 0.5}, std::pair{"not a file of the mod", 0.0}}) {
         auto file = dir / "smoke-variant.spcreator";
@@ -1442,12 +1459,20 @@ void smokeDescribe(std::string const& tag) {
         sps.push_back(fmt::format("{} \"{}\" {:.2f}% x {:.1f} h{}", sp->id, sp->name, sp->percent, sp->x, sp->handoff()));
     }
     std::string names = "-", key = "-";
+    int older = 0;
+    uintmax_t bytes = 0;
     if (auto level = storage::level()) {
         key = level->key;
         auto dir = Mod::get()->getSaveDir() / g_smoke.storageRoot / level->key;
         std::error_code ec;
         for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
             files.push_back(utils::string::pathToString(it->path().filename()));
+            std::error_code ec2;
+            bytes += it->file_size(ec2);
+            // Not compressed: of before SP files were.
+            char magic[8] = {};
+            if (it->path().extension() == ".spc") std::ifstream(it->path(), std::ios::binary).read(magic, sizeof(magic));
+            older += std::string_view(magic, sizeof(magic)) == "SPCREATR";
         }
         std::sort(files.begin(), files.end());
         if (auto res = file::readString(dir / "names.json"); res.isOk()) {
@@ -1459,9 +1484,9 @@ void smokeDescribe(std::string const& tag) {
         versions.push_back(fmt::format("{} \"{}\" {} SPs{}{}", utils::string::pathToString(v.dir.filename()), v.name, v.sps,
             v.fits ? "" : " (doesn't fit)", v.movable ? " (movable)" : ""));
     }
-    log::info("Smoke test: STATE {}: root {}, level {}, {} SPs [{}], active {}, files [{}], names {}, versions {} [{}]", tag,
-        g_smoke.storageRoot, key, sps.size(), fmt::join(sps, "; "), activeLabel(), fmt::join(files, ", "), names,
-        versions.size(), fmt::join(versions, "; "));
+    log::info("Smoke test: STATE {}: root {}, level {}, {} SPs [{}], active {}, files [{}] ({} KB, {} not compressed), "
+        "names {}, versions {} [{}]", tag, g_smoke.storageRoot, key, sps.size(), fmt::join(sps, "; "), activeLabel(),
+        fmt::join(files, ", "), bytes / 1024, older, names, versions.size(), fmt::join(versions, "; "));
 }
 
 GJGameLevel* smokeLevel(std::string const& what) {
@@ -1836,6 +1861,21 @@ void nextAction() {
     if (op == "rename") {
         auto nameAt = rest.find(':');
         return smokeRename(static_cast<size_t>(arg(0, 0)), nameAt == std::string::npos ? std::string() : rest.substr(nameAt + 1));
+    }
+    if (op == "damage") {
+        // The file of SP i made wrong inside (storage::variantOf), for the next load to set aside or read.
+        size_t i = static_cast<size_t>(arg(0, 0));
+        auto how = args.size() > 1 ? args[1] : std::string("garbled");
+        auto level = storage::level();
+        if (i < sps.size() && level) {
+            core::saveAll();
+            auto path = Mod::get()->getSaveDir() / t.storageRoot / level->key / fmt::format("sp-{}.spc", sps[i]->id);
+            auto bytes = file::readBinary(path);
+            auto res = bytes.isOk() ? file::writeBinary(path, storage::variantOf(bytes.unwrap(), how))
+                                    : Result<>(Err(bytes.unwrapErr()));
+            log::info("Smoke test: SP {} file {}: {}", sps[i]->id, how, res.isOk() ? "written" : res.unwrapErr());
+        }
+        return next();
     }
     log::error("Smoke test: no such step: {}", op);
     next();

@@ -88,5 +88,6 @@ cmake --build build
 
 ## License
 
-[GPLv3](LICENSE). The mod saves SPs with [PersistenceAPI](https://github.com/0x5abe/PersistenceAPI) (GPLv3).
+[GPLv3](LICENSE). The mod saves SPs with [PersistenceAPI](https://github.com/0x5abe/PersistenceAPI) (GPLv3)
+and compresses them with [zlib](https://zlib.net) (zlib License).
 Its font is Ubuntu Bold, under the [Ubuntu Font Licence](resources/fonts/UFL.txt).

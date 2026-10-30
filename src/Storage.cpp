@@ -19,6 +19,8 @@
 #include <sabe.persistenceapi/include/hooks/cocos2d/CCNode.hpp>
 #include <sabe.persistenceapi/include/util/Stream.hpp>
 
+#include <zlib.h>
+
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -28,7 +30,10 @@
 #include <ctime>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <set>
+#include <sstream>
+#include <streambuf>
 #include <unordered_map>
 
 using namespace geode::prelude;
@@ -37,6 +42,8 @@ using namespace persistenceAPI;
 namespace {
 
 constexpr char MAGIC[8] = {'S', 'P', 'C', 'R', 'E', 'A', 'T', 'R'};
+// A file with the body compressed after its header (see compress()). Older files hold it as it is (MAGIC).
+constexpr char COMPRESSED_MAGIC[8] = {'S', 'P', 'C', 'R', 'E', 'A', 'T', 'Z'};
 constexpr int FORMAT_VERSION = 2;
 // PersistenceAPI's own format version, the one Practice Checkpoint Permanence writes with.
 constexpr int PA_VERSION = 2;
@@ -83,24 +90,48 @@ struct Level {
 // The open level's folder name, set before load() can give up on it (its SPs not loaded, nor saved).
 std::string g_openKey;
 
-// persistenceAPI::Stream opens files by a std::string path, which MSVC reads in the ANSI code page: a
-// save folder with letters outside it (a Cyrillic Windows user name) wouldn't open. This opens by path.
-class FileStream : public Stream {
+// A persistenceAPI::Stream in memory: an SP file's body is compressed, so it's written and read here, not in
+// the file. PersistenceAPI reads and writes through its std::fstream only, which gets a buffer in memory.
+class MemoryStream : public Stream {
+    struct ReadBuffer : std::streambuf {
+        explicit ReadBuffer(ByteSpan bytes) {
+            // Only read from.
+            auto data = reinterpret_cast<char*>(const_cast<uint8_t*>(bytes.data()));
+            setg(data, data, data + bytes.size());
+        }
+    };
+    std::optional<ReadBuffer> m_in;
+    std::stringbuf m_out{std::ios::out};
+
 public:
-    bool open(std::filesystem::path const& path, bool write, unsigned int* bytesRead = nullptr) {
-        delete m_stream;
-        m_stream = new std::fstream(path, std::ios::binary | (write ? std::ios::out | std::ios::trunc : std::ios::in));
+    // Writing.
+    MemoryStream() {
+        m_stream = new std::fstream();
+        m_stream->std::ios::rdbuf(&m_out);
+        m_PAVersion = PA_VERSION;
+    }
+    // Reading `bytes`, which outlive it.
+    MemoryStream(ByteSpan bytes, unsigned int* bytesRead) : m_in(std::in_place, bytes) {
+        m_stream = new std::fstream();
+        m_stream->std::ios::rdbuf(&*m_in);
         m_bytesRead = bytesRead;
         m_PAVersion = PA_VERSION;
-        if (!m_stream->good()) return false;
-        // PersistenceAPI reads counts and sizes without checking them: in a file that doesn't hold what they
+        // PersistenceAPI reads counts and sizes without checking them: in a body that doesn't hold what they
         // say, it would go on past the end. This makes that throw, for readSP to catch.
-        if (!write) m_stream->exceptions(std::ios::failbit | std::ios::badbit);
-        return true;
+        m_stream->exceptions(std::ios::failbit | std::ios::badbit);
+    }
+    ~MemoryStream() {
+        // Before its buffers go (Stream would delete it after).
+        delete m_stream;
+        m_stream = nullptr;
     }
 
     bool good() const {
         return m_stream && m_stream->good();
+    }
+
+    std::string written() {
+        return std::move(m_out).str();
     }
 };
 
@@ -420,7 +451,8 @@ CheckpointObject* readCheckpoint(Stream& in) {
     return cp;
 }
 
-// Body: magic, format, level stamp, the SP's own data, the checkpoint, the presses. save() then seals it.
+// Body: magic, format, level stamp, the SP's own data, the checkpoint, the presses. fileFor() then compresses
+// and seals it.
 void writeSP(Stream& out, StartPoint const& sp) {
     char magic[sizeof(MAGIC)];
     std::memcpy(magic, MAGIC, sizeof(MAGIC));
@@ -468,9 +500,17 @@ void writeSP(Stream& out, StartPoint const& sp) {
 
 enum class ReadError { None, Damaged, Other };
 
-// Where the parts of an SP file before its frames are (writeSP).
+// Where the parts of an SP file before its frames are (writeSP). This header stays as it is when the rest is
+// compressed: readHeader and percentIn read it without unpacking.
 constexpr size_t FORMAT_AT = sizeof(MAGIC), STAMP_AT = FORMAT_AT + 4, ID_AT = STAMP_AT + 8, X_AT = ID_AT + 4,
-    PERCENT_AT = X_AT + 4;
+    PERCENT_AT = X_AT + 4, HEADER_SIZE = PERCENT_AT + 4;
+// In a compressed file, after the header: the size of the body (header and all), then the rest of it compressed.
+constexpr size_t COMPRESSED_AT = HEADER_SIZE + sizeof(uint32_t);
+// zlib's: of BPATA's SPs, 1 leaves 34% of the size (11 ms an SP), 6 32% (25-30 ms).
+constexpr int COMPRESSION_LEVEL = 1;
+// SPs compress to a third of their size, small ones to a seventh: a body this many times its compressed size
+// isn't one.
+constexpr size_t MAX_RATIO = 32;
 constexpr size_t MIN_FILE_SIZE = sizeof(MAGIC) + 64 + SEAL_SIZE;
 // Far above what an SP of BPATA (96k objects) takes, 250-800 KB.
 constexpr size_t MAX_FILE_SIZE = 32 * 1024 * 1024;
@@ -497,22 +537,129 @@ size_t sealedBody(ByteSpan bytes, std::string& error) {
     return bodySize;
 }
 
-// The same SP has the same hash whatever its id (the one part an import changes).
-uint64_t contentHash(ByteSpan bytes, size_t bodySize) {
-    uint32_t noId = 0;
-    auto h = hashBytes(bytes.data(), ID_AT);
-    h = hashBytes(&noId, sizeof(noId), h);
-    return hashBytes(bytes.data() + ID_AT + 4, bodySize - ID_AT - 4, h);
+// The hash and the end marker after `bytes`.
+void seal(ByteVector& bytes) {
+    uint64_t hash = hashBytes(bytes.data(), bytes.size());
+    auto put = [&bytes](void const* data, size_t size) {
+        auto at = static_cast<uint8_t const*>(data);
+        bytes.insert(bytes.end(), at, at + size);
+    };
+    put(&hash, sizeof(hash));
+    put(&END_MARKER, sizeof(END_MARKER));
 }
 
-std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int id, size_t bodySize, uint64_t versionStamp,
-    std::string& error, ReadError& kind) {
-    unsigned int bytesRead = 0;
-    FileStream in;
-    if (!in.open(path, false, &bytesRead)) {
-        error = "can't open it";
-        return nullptr;
+bool isCompressed(ByteSpan bytes) {
+    return bytes.size() >= sizeof(COMPRESSED_MAGIC) &&
+        std::memcmp(bytes.data(), COMPRESSED_MAGIC, sizeof(COMPRESSED_MAGIC)) == 0;
+}
+
+// The size a compressed file gives its body, if bodyOf unpacks that much, else 0. A few KB compressed can stand
+// for GBs: no more than a file may hold, nor far more than SPs compress to.
+size_t sizeToUnpack(ByteSpan bytes) {
+    static_assert(MIN_FILE_SIZE - SEAL_SIZE > COMPRESSED_AT);
+    if (bytes.size() < MIN_FILE_SIZE) return 0;
+    size_t data = bytes.size() - SEAL_SIZE - COMPRESSED_AT;
+    uint32_t size = 0;
+    std::memcpy(&size, bytes.data() + HEADER_SIZE, sizeof(size));
+    if (size <= HEADER_SIZE || size > MAX_FILE_SIZE || size - HEADER_SIZE > MAX_RATIO * data) return 0;
+    return size;
+}
+
+// The body writeSP wrote of a whole file: unpacked into `unpacked` if the file is compressed, else the file's
+// own bytes. Empty if the file isn't whole or doesn't unpack.
+ByteSpan bodyOf(ByteSpan bytes, ByteVector& unpacked, std::string& error) {
+    size_t stored = sealedBody(bytes, error);
+    if (stored == 0) return {};
+    if (!isCompressed(bytes)) return bytes.first(stored);
+    size_t size = sizeToUnpack(bytes);
+    if (size == 0) {
+        uint32_t given = 0;
+        std::memcpy(&given, bytes.data() + HEADER_SIZE, sizeof(given));
+        error = fmt::format("{} bytes unpacked from {}", given, stored - COMPRESSED_AT);
+        return {};
     }
+    unpacked.resize(size);
+    std::memcpy(unpacked.data(), MAGIC, sizeof(MAGIC));
+    std::memcpy(unpacked.data() + sizeof(MAGIC), bytes.data() + sizeof(MAGIC), HEADER_SIZE - sizeof(MAGIC));
+    uLongf out = static_cast<uLongf>(size - HEADER_SIZE);
+    uLong in = static_cast<uLong>(stored - COMPRESSED_AT);
+    // Z_OK once the data ends where it should, its checksum right; an end before `in` leaves the rest unread.
+    int res = uncompress2(unpacked.data() + HEADER_SIZE, &out, bytes.data() + COMPRESSED_AT, &in);
+    if (res != Z_OK || out != size - HEADER_SIZE || in != stored - COMPRESSED_AT) {
+        error = fmt::format("doesn't unpack (zlib {}: {} of {} bytes, from {} of {})", res, out, size - HEADER_SIZE, in,
+            stored - COMPRESSED_AT);
+        return {};
+    }
+    return unpacked;
+}
+
+// A body writeSP wrote, as an SP file: its header as it is, the rest compressed, sealed; or, if bodyOf doesn't
+// read that back (compressed far more than SPs are, it takes it for a bomb), all of it as it is, sealed. Read
+// back either way, to be sure, before what it was made of goes.
+std::optional<ByteVector> compress(ByteSpan body, std::string& error) {
+    if (body.size() <= HEADER_SIZE || body.size() > MAX_FILE_SIZE - SEAL_SIZE) {
+        error = fmt::format("a body of {} bytes", body.size());
+        return std::nullopt;
+    }
+    // Unpacked, it starts with MAGIC whatever it started with.
+    if (std::memcmp(body.data(), MAGIC, sizeof(MAGIC)) != 0) {
+        error = "not an SP file";
+        return std::nullopt;
+    }
+    auto readsBack = [&](ByteSpan file) {
+        ByteVector unpacked;
+        auto again = bodyOf(file, unpacked, error);
+        if (again.empty()) return false;
+        if (std::ranges::equal(again, body)) return true;
+        error = "it reads back as something else";
+        return false;
+    };
+    uLong rest = static_cast<uLong>(body.size() - HEADER_SIZE);
+    uLongf packed = compressBound(rest);
+    ByteVector file(COMPRESSED_AT + packed);
+    std::memcpy(file.data(), COMPRESSED_MAGIC, sizeof(COMPRESSED_MAGIC));
+    std::memcpy(file.data() + sizeof(MAGIC), body.data() + sizeof(MAGIC), HEADER_SIZE - sizeof(MAGIC));
+    auto size = static_cast<uint32_t>(body.size());
+    std::memcpy(file.data() + HEADER_SIZE, &size, sizeof(size));
+    int res = compress2(file.data() + COMPRESSED_AT, &packed, body.data() + HEADER_SIZE, rest, COMPRESSION_LEVEL);
+    if (res == Z_OK) {
+        file.resize(COMPRESSED_AT + packed);
+        seal(file);
+        if (readsBack(file)) return file;
+    }
+    else error = fmt::format("zlib {}", res);
+    log::warn("A body of {} bytes kept as it is: compressed, {}", body.size(), error);
+    ByteVector plain(body.begin(), body.end());
+    seal(plain);
+    if (readsBack(plain)) return plain;
+    return std::nullopt;
+}
+
+// A whole SP file as it's kept: compressed. One that is as it is; an older one's body compressed.
+std::optional<ByteVector> keptFile(ByteSpan file, std::string& error) {
+    if (isCompressed(file)) {
+        if (sealedBody(file, error) == 0) return std::nullopt;
+        return ByteVector(file.begin(), file.end());
+    }
+    ByteVector unpacked;
+    auto body = bodyOf(file, unpacked, error);
+    if (body.empty()) return std::nullopt;
+    return compress(body, error);
+}
+
+// The same SP has the same hash whatever its id (the one part an import changes), compressed or not.
+uint64_t contentHash(ByteSpan body) {
+    uint32_t noId = 0;
+    auto h = hashBytes(body.data(), ID_AT);
+    h = hashBytes(&noId, sizeof(noId), h);
+    return hashBytes(body.data() + ID_AT + 4, body.size() - ID_AT - 4, h);
+}
+
+// `body` as bodyOf gives it.
+std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStamp, std::string& error, ReadError& kind) {
+    size_t bodySize = body.size();
+    unsigned int bytesRead = 0;
+    MemoryStream in(body, &bytesRead);
     char magic[sizeof(MAGIC)] = {};
     in.read(magic, sizeof(magic));
     int format = 0;
@@ -575,10 +722,9 @@ std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int 
         }
     }
     if (bytesRead != bodySize) {
-        error = fmt::format("the checkpoint read {} bytes, the file holds {}", bytesRead, bodySize);
+        error = fmt::format("the checkpoint read {} bytes, the body holds {}", bytesRead, bodySize);
         return nullptr;
     }
-    in.end();
     kind = ReadError::None;
     return sp;
 }
@@ -587,20 +733,21 @@ std::shared_ptr<StartPoint> readSealedSP(std::filesystem::path const& path, int 
 std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, uint64_t versionStamp, std::string& error,
     ReadError& kind) {
     kind = ReadError::Other;
-    // PersistenceAPI checks nothing it reads, so the whole file is checked against its seal first:
-    // past that it is exactly what save() wrote.
+    // PersistenceAPI checks nothing it reads, so the whole file is checked against its seal first (and a
+    // compressed one unpacked): past that it isn't cut off or changed since it was sealed.
     auto data = file::readBinary(path);
     if (data.isErr()) {
         error = fmt::format("can't read it: {}", data.unwrapErr());
         return nullptr;
     }
-    size_t bodySize = sealedBody(data.unwrap(), error);
-    if (bodySize == 0) {
+    ByteVector unpacked;
+    auto body = bodyOf(data.unwrap(), unpacked, error);
+    if (body.empty()) {
         kind = ReadError::Damaged;
         return nullptr;
     }
     try {
-        return readSealedSP(path, id, bodySize, versionStamp, error, kind);
+        return readBody(body, id, versionStamp, error, kind);
     } catch (std::exception const& e) {
         // Whole, but not what an SP file holds (an imported file can be anything).
         kind = ReadError::Damaged;
@@ -611,6 +758,43 @@ std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, ui
 
 std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, std::string& error, ReadError& kind) {
     return readSP(path, id, g_level.stamp, error, kind);
+}
+
+// The SP files of `dir` written before SP files were compressed, compressed: the same body, not read again
+// through PersistenceAPI. Damaged ones stay as they are, for load() to set aside.
+void compressOlder(std::filesystem::path const& dir) {
+    auto start = std::chrono::steady_clock::now();
+    int done = 0, failed = 0;
+    uintmax_t before = 0, after = 0;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+        auto const& path = it->path();
+        if (idFromName(path) == 0) continue;
+        char magic[sizeof(MAGIC)] = {};
+        std::ifstream(path, std::ios::binary).read(magic, sizeof(magic));
+        if (std::memcmp(magic, MAGIC, sizeof(MAGIC)) != 0) continue;
+        auto data = file::readBinary(path);
+        std::string error = data.isErr() ? data.unwrapErr() : "";
+        auto file = data.isOk() ? keptFile(data.unwrap(), error) : std::nullopt;
+        // Kept as it is (see compress()).
+        if (file && std::ranges::equal(*file, data.unwrap())) continue;
+        if (file) {
+            if (auto res = file::writeBinarySafe(path, *file); res.isErr()) error = res.unwrapErr();
+            else {
+                done++;
+                before += data.unwrap().size();
+                after += file->size();
+                continue;
+            }
+        }
+        failed++;
+        log::warn("SP file {} of {} not compressed: {}", path.filename(), dir.filename(), error);
+    }
+    if (done == 0 && failed == 0) return;
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    log::info("{}: {} older SP files compressed, {} KB to {} KB, in {:.0f} ms; {} not", dir.filename(), done, before / 1024,
+        after / 1024, ms, failed);
 }
 
 // A stand-in for a level object an update took away, of the same kind (its object ID), for while an SP of
@@ -1070,6 +1254,9 @@ Loaded load(PlayLayer* pl) {
         sortPercents(other.notMoved);
         out.notMoved = std::move(other.notMoved);
     }
+    // Once: what was saved before SP files were compressed, here and in the level's versions.
+    compressOlder(dir);
+    for (auto const& v : versionsOf(dir, info)) compressOlder(v.dir);
 
     auto start = std::chrono::steady_clock::now();
     int failed = 0;
@@ -1140,50 +1327,32 @@ Loaded load(PlayLayer* pl) {
 
 namespace {
 
-// The SP's file at `path`, whole or not at all.
-bool writeSPFile(StartPoint const& sp, std::filesystem::path const& path) {
-    auto temp = path;
-    temp += ".tmp";
-    std::error_code ec;
-    auto fail = [&](std::string const& why) {
-        log::error("Can't save SP {} to {}: {}", sp.id, path, why);
-        std::filesystem::remove(temp, ec);
-        return false;
-    };
-    {
-        FileStream out;
-        if (!out.open(temp, true)) return fail("can't create the file");
-        writeSP(out, sp);
-        bool written = out.good();
-        out.end();  // closed before fail() deletes it: Windows doesn't delete open files
-        if (!written) return fail("write failed");
-    }
-    // Seal the body with its hash, which readSP checks before PersistenceAPI reads anything.
-    auto body = file::readBinary(temp);
-    if (body.isErr()) return fail(body.unwrapErr());
-    uint64_t hash = hashBytes(body.unwrap().data(), body.unwrap().size());
-    {
-        std::ofstream seal(temp, std::ios::binary | std::ios::app);
-        seal.write(reinterpret_cast<char const*>(&hash), sizeof(hash));
-        seal.write(reinterpret_cast<char const*>(&END_MARKER), sizeof(END_MARKER));
-        seal.close();
-        if (!seal) return fail("write failed");
-    }
-    // Written in full, then put in place: a crash while saving leaves no damaged SP behind.
-    std::filesystem::rename(temp, path, ec);
-    if (ec) return fail(ec.message());
-    return true;
+// The SP's file as save() writes it, for the open level version: sealed with its hash, which readSP checks
+// before PersistenceAPI reads anything.
+Result<ByteVector> fileFor(StartPoint const& sp) {
+    MemoryStream out;
+    writeSP(out, sp);
+    if (!out.good()) return Err("can't write it");
+    auto body = out.written();
+    std::string error;
+    auto file = compress(ByteSpan(reinterpret_cast<uint8_t const*>(body.data()), body.size()), error);
+    if (!file) return Err(error);
+    return Ok(std::move(*file));
 }
 
-// The SP's file as save() would write it, for the open level version.
-Result<ByteVector> fileFor(StartPoint const& sp) {
-    // .tmp: load() deletes it if a crash leaves it.
-    auto path = g_level.dir / fmt::format("moving-{}.tmp", sp.id);
-    if (!writeSPFile(sp, path)) return Err("can't write it");
-    auto bytes = file::readBinary(path);
-    std::error_code ec;
-    std::filesystem::remove(path, ec);
-    return bytes;
+// The SP's file at `path`, whole or not at all.
+bool writeSPFile(StartPoint const& sp, std::filesystem::path const& path) {
+    auto file = fileFor(sp);
+    // Written in full (to path.tmp, which load() deletes if a crash leaves it), then put in place: a crash
+    // while saving leaves no damaged SP behind.
+    if (file.isOk()) {
+        if (auto res = file::writeBinarySafe(path, file.unwrap()); res.isErr()) file = Err(res.unwrapErr());
+    }
+    if (file.isErr()) {
+        log::error("Can't save SP {} to {}: {}", sp.id, path, file.unwrapErr());
+        return false;
+    }
+    return true;
 }
 
 }
@@ -1239,29 +1408,35 @@ Result<ByteVector> fileOf(StartPoint const& sp) {
 
 Result<Header> readHeader(ByteSpan bytes) {
     std::string error;
-    size_t body = sealedBody(bytes, error);
-    if (body == 0) return Err(error);
-    if (std::memcmp(bytes.data(), MAGIC, sizeof(MAGIC)) != 0) return Err("not an SP file");
+    ByteVector unpacked;
+    auto body = bodyOf(bytes, unpacked, error);
+    if (body.empty()) return Err(error);
+    if (std::memcmp(body.data(), MAGIC, sizeof(MAGIC)) != 0) return Err("not an SP file");
     int format = 0;
     uint64_t stamp = 0;
     Header header;
-    std::memcpy(&format, bytes.data() + FORMAT_AT, sizeof(format));
-    std::memcpy(&stamp, bytes.data() + STAMP_AT, sizeof(stamp));
-    std::memcpy(&header.x, bytes.data() + X_AT, sizeof(header.x));
-    std::memcpy(&header.percent, bytes.data() + PERCENT_AT, sizeof(header.percent));
+    std::memcpy(&format, body.data() + FORMAT_AT, sizeof(format));
+    std::memcpy(&stamp, body.data() + STAMP_AT, sizeof(stamp));
+    std::memcpy(&header.x, body.data() + X_AT, sizeof(header.x));
+    std::memcpy(&header.percent, body.data() + PERCENT_AT, sizeof(header.percent));
     if (format != FORMAT_VERSION) return Err(fmt::format("format {}, not {}", format, FORMAT_VERSION));
     if (stamp != g_level.stamp) return Err("made for another level or version");
     if (!std::isfinite(header.x) || !std::isfinite(header.percent)) return Err("no position");
-    header.content = contentHash(bytes, body);
+    header.content = contentHash(body);
     return Ok(header);
+}
+
+size_t unpackedSize(ByteSpan bytes) {
+    return isCompressed(bytes) ? sizeToUnpack(bytes) : bytes.size();
 }
 
 uint64_t contentOf(StartPoint const& sp) {
     auto bytes = fileOf(sp);
     if (bytes.isErr()) return 0;
     std::string error;
-    size_t body = sealedBody(bytes.unwrap(), error);
-    return body == 0 ? 0 : contentHash(bytes.unwrap(), body);
+    ByteVector unpacked;
+    auto body = bodyOf(bytes.unwrap(), unpacked, error);
+    return body.empty() ? 0 : contentHash(body);
 }
 
 std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files, int& nextId) {
@@ -1279,7 +1454,8 @@ std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files,
         std::string error;
         std::shared_ptr<StartPoint> sp;
         // Read back the way load() reads it, and in place only if that worked.
-        auto written = file::writeBinary(temp, bytes);
+        auto kept = keptFile(bytes, error);
+        auto written = kept ? file::writeBinary(temp, *kept) : Result<>(Err(error));
         if (written.isErr()) {
             error = written.unwrapErr();
         } else {
@@ -1312,15 +1488,25 @@ std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files,
     return added;
 }
 
-// A version that fits holding just `sps`: the same files, byte for byte, under the same names. A copy
-// damaged on disk doesn't match, so the SPs never go in favour of a broken one.
+// A version that fits holding just `sps`: files with the same bodies (compressed or not), under the same
+// names. A copy damaged on disk doesn't match, so the SPs never go in favour of a broken one.
 std::optional<Version> sameVersion(std::vector<std::shared_ptr<StartPoint>> const& sps) {
+    // A body, id and all.
     using Entry = std::pair<ByteVector, std::string>;
+    auto entryOf = [](ByteSpan file, std::string name) -> std::optional<Entry> {
+        std::string error;
+        ByteVector unpacked;
+        auto body = bodyOf(file, unpacked, error);
+        if (body.empty()) return std::nullopt;
+        if (unpacked.empty()) unpacked.assign(body.begin(), body.end());
+        return Entry{std::move(unpacked), std::move(name)};
+    };
     std::vector<Entry> own;
     for (auto const& sp : sps) {
         auto bytes = file::readBinary(spPath(sp->id));
-        if (bytes.isErr()) return std::nullopt;
-        own.push_back({std::move(bytes).unwrap(), sp->name});
+        auto entry = bytes.isOk() ? entryOf(bytes.unwrap(), sp->name) : std::nullopt;
+        if (!entry) return std::nullopt;
+        own.push_back(std::move(*entry));
     }
     std::sort(own.begin(), own.end());
     for (auto const& v : versions()) {
@@ -1328,7 +1514,11 @@ std::optional<Version> sameVersion(std::vector<std::shared_ptr<StartPoint>> cons
         auto files = readVersion(v);
         if (files.isErr() || files.unwrap().size() != sps.size()) continue;
         std::vector<Entry> theirs;
-        for (auto& f : files.unwrap()) theirs.push_back({std::move(f.file), std::move(f.name)});
+        for (auto& f : files.unwrap()) {
+            auto entry = entryOf(f.file, std::move(f.name));
+            if (!entry) break;
+            theirs.push_back(std::move(*entry));
+        }
         std::sort(theirs.begin(), theirs.end());
         if (theirs == own) return v;
     }
@@ -1430,6 +1620,61 @@ Result<MovedVersion> moveVersion(Version const& version) {
 }
 
 #ifdef SPC_SMOKE
+ByteVector variantOf(ByteSpan file, std::string_view how) {
+    std::string error;
+    ByteVector unpacked;
+    auto body = bodyOf(file, unpacked, error);
+    if (body.empty() || !isCompressed(file)) {
+        log::error("Smoke test: no variant {}: not a compressed SP file ({})", how, error);
+        return ByteVector(file.begin(), file.end());
+    }
+    if (how == "flat") {
+        // Its header, then 4 MB of zeros: compresses far more than SPs do, so it's kept as it is.
+        ByteVector flat(body.begin(), body.begin() + HEADER_SIZE);
+        flat.resize(HEADER_SIZE + 4 * 1024 * 1024);
+        auto kept = compress(flat, error);
+        log::info("Smoke test: a flat body: {}", !kept ? error : isCompressed(*kept) ? "compressed" : "kept as it is");
+        return kept ? std::move(*kept) : ByteVector(file.begin(), file.end());
+    }
+    ByteVector out;
+    if (how == "older") out.assign(body.begin(), body.end());
+    else {
+        out.assign(file.begin(), file.end() - SEAL_SIZE);
+        uint32_t size = 0;
+        std::memcpy(&size, out.data() + HEADER_SIZE, sizeof(size));
+        auto give = [&out](uint32_t size) { std::memcpy(out.data() + HEADER_SIZE, &size, sizeof(size)); };
+        if (how == "garbled") out[COMPRESSED_AT + (out.size() - COMPRESSED_AT) / 2] ^= 0x5a;
+        else if (how == "cut") out.resize(COMPRESSED_AT + (out.size() - COMPRESSED_AT) / 2);
+        else if (how == "trailing") out.insert(out.end(), 64, 0x41);
+        else if (how == "bigger") give(size + 1);
+        else if (how == "smaller") give(size - 1);
+        else if (how == "huge") give(0xffffffffu);
+        else if (how == "dense") give(static_cast<uint32_t>(MAX_FILE_SIZE));
+        else if (how == "noise") {
+            // 1 MB that doesn't compress, giving the most a file may hold: unpacked, and found short.
+            ByteVector noise(1024 * 1024);
+            uint32_t x = 1;
+            for (auto& b : noise) b = static_cast<uint8_t>((x = x * 1664525 + 1013904223) >> 24);
+            uLongf packed = compressBound(static_cast<uLong>(noise.size()));
+            out.resize(COMPRESSED_AT + packed);
+            compress2(out.data() + COMPRESSED_AT, &packed, noise.data(), static_cast<uLong>(noise.size()), 1);
+            out.resize(COMPRESSED_AT + packed);
+            give(static_cast<uint32_t>(MAX_FILE_SIZE));
+        }
+        else if (how == "bomb") {
+            // 64 MB of zeros, some 64 KB compressed, for the size of the body.
+            ByteVector zeros(64 * 1024 * 1024);
+            uLongf packed = compressBound(static_cast<uLong>(zeros.size()));
+            out.resize(COMPRESSED_AT + packed);
+            compress2(out.data() + COMPRESSED_AT, &packed, zeros.data(), static_cast<uLong>(zeros.size()), 9);
+            out.resize(COMPRESSED_AT + packed);
+        }
+        else log::error("Smoke test: no variant {}", how);
+    }
+    seal(out);
+    return out;
+}
+
 std::vector<References> referencesOfSPs() {
     std::vector<References> out;
     auto pl = PlayLayer::get();

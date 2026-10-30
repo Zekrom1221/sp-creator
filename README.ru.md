@@ -86,5 +86,6 @@ cmake --build build
 
 ## Лицензия
 
-[GPLv3](LICENSE). SP сохраняются через [PersistenceAPI](https://github.com/0x5abe/PersistenceAPI) (GPLv3).
+[GPLv3](LICENSE). SP сохраняются через [PersistenceAPI](https://github.com/0x5abe/PersistenceAPI) (GPLv3)
+и сжимаются через [zlib](https://zlib.net) (лицензия zlib).
 Шрифт мода — Ubuntu Bold, по [Ubuntu Font Licence](resources/fonts/UFL.txt).

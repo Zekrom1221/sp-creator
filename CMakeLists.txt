@@ -28,4 +28,13 @@ endif()
 
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 
+# zlib for the SP files (src/Storage.cpp), built in: the game's own isn't exported.
+CPMAddPackage(
+    NAME zlib
+    GITHUB_REPOSITORY madler/zlib
+    GIT_TAG v1.3.2
+    OPTIONS "ZLIB_BUILD_TESTING OFF" "ZLIB_BUILD_SHARED OFF" "ZLIB_INSTALL OFF"
+)
+target_link_libraries(${PROJECT_NAME} ZLIB::ZLIBSTATIC)
+
 setup_geode_mod(${PROJECT_NAME})

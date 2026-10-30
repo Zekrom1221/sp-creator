@@ -14,7 +14,7 @@
 // the SPs belong to), names.json (the names players gave them), objects.bin (prints of the version's
 // objects, to move the SPs over when the level is updated) and one sp-<id>.spc file per SP: its
 // auto part and its checkpoint, the checkpoint written with PersistenceAPI in the field order Practice
-// Checkpoint Permanence uses.
+// Checkpoint Permanence uses; compressed (zlib) but for a short header.
 namespace storage {
     // What load() has to tell the player.
     enum class Notice {
@@ -84,6 +84,9 @@ namespace storage {
         uint64_t content = 0;  // the same SP has the same, whatever its id
     };
     geode::Result<Header> readHeader(geode::ByteSpan file);
+    // What reading an SP file unpacks, as far as the file tells without reading it: its body as it gives it,
+    // if that's within what is unpacked at all (a compressed file can stand for far more than its own size).
+    size_t unpackedSize(geode::ByteSpan file);
     // Content of the SP's saved file, as in Header; 0 if it can't be read.
     uint64_t contentOf(StartPoint const& sp);
     // SP files (passed through readHeader) loaded and saved under ids from `nextId` on: an SP per file,
@@ -98,8 +101,8 @@ namespace storage {
     };
     // Moves the files of SPs of the level into a folder of their own (with their names), a version of
     // them, out of the way of imported ones or of the player. If a version that fits holds just these SPs
-    // already, byte for byte and with the same names, their files are deleted instead, and that version
-    // becomes the newest.
+    // already (the same bodies, compressed or not, with the same names), their files are deleted instead, and
+    // that version becomes the newest.
     Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps, AsideFor why);
 
     // SPs set aside in a folder next to the level's. Kept until the player deletes them.
@@ -129,6 +132,12 @@ namespace storage {
     // among the open version's, by the prints saved with them.
     geode::Result<MovedVersion> moveVersion(Version const& version);
 #ifdef SPC_SMOKE
+    // Smoke test: a compressed SP file made whole (sealed) but wrong inside, `how`: "garbled", "cut", "trailing"
+    // (bytes after the compressed data), "bigger"/"smaller" (the size it gives), "huge" (past the limit), "dense"
+    // (the most a file may hold, far more than its data compresses), "noise" (as much, from 1 MB that doesn't
+    // compress), "bomb" (a body that unpacks far past what it gives); or "older": the same SP as a file of
+    // before compression; or "flat": its header and zeros, which compress too well to be kept compressed.
+    geode::ByteVector variantOf(geode::ByteSpan file, std::string_view how);
     // Smoke test: the objects (indices in m_objects) the checkpoint of each SP of the open level refers to.
     struct References {
         int id = 0;
