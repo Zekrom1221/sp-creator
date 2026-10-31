@@ -78,6 +78,9 @@ Only classic levels: platformer levels have no SPs.
 - Where the gameplay of a level is rotated or goes back, SPs are in the order of where they stand, not of their
   percent: there the SP list and the `,` and `.` keys can go back and forth. Mega Hack's switcher orders them
   the same way.
+- SPs placed in a copy of a level (one of your own levels) with Low Detail Mode on may not import for someone
+  else: they get *These SPs are for Low Detail Mode off* or *These SPs are for another version of this level*.
+  Until this is fixed, place and import such SPs with Low Detail Mode off on both sides.
 
 ## Building
 
