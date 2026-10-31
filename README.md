@@ -4,7 +4,7 @@
 
 A [Geode](https://geode-sdk.org) mod for Geometry Dash 2.2081 (Windows).
 
-[По-русски](README.ru.md)
+[По-русски](README.ru.md) · [Telegram channel](https://t.me/spcreator_gd) (news and updates, in Russian)
 
 Place your own startpos (SP) in any level while you play: online levels, main levels and your own. Starting
 from it replays a short auto part (0.6 s by default) before you take control, so you enter the hard part at
@@ -14,7 +14,8 @@ own run, and you can't die in it.
 Attempts from your SPs count in the attempt counter, like attempts from any startpos, but they don't save a new
 best or a completion.
 
-**This is a beta.** Found a bug, or have an idea? [Open an issue](https://github.com/Zekrom1221/sp-creator/issues).
+**This is a beta.** Found a bug, or have an idea? [Open an issue](https://github.com/Zekrom1221/sp-creator/issues)
+or [write to the Telegram channel](https://t.me/spcreator_gd?direct).
 
 ## Installing
 

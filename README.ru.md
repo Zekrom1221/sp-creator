@@ -4,7 +4,7 @@
 
 Мод для Geometry Dash 2.2081 (Windows) на [Geode](https://geode-sdk.org).
 
-[In English](README.md)
+[In English](README.md) · [Канал в Telegram](https://t.me/spcreator_gd) (новости и обновления)
 
 Ставь свои стартпосы (SP) прямо во время игры в любом уровне: онлайн-уровнях, уровнях игры и своих. Со старта
 с SP сначала идёт короткая авто-часть (по умолчанию 0,6 с), а потом управление переходит к тебе. Так ты
@@ -14,7 +14,8 @@
 Попытки с SP идут в счётчик попыток, как попытки с любого стартпоса, но новый рекорд и прохождение не
 засчитываются.
 
-**Это бета.** Есть баг или идея? [Пиши в Issues](https://github.com/Zekrom1221/sp-creator/issues).
+**Это бета.** Есть баг или идея? [Пиши в Issues](https://github.com/Zekrom1221/sp-creator/issues) или
+[каналу в Telegram](https://t.me/spcreator_gd?direct).
 
 ## Установка
 
