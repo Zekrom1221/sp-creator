@@ -52,6 +52,21 @@ namespace storage {
     // Gives an object the mod adds to the level after its own objects the unique ID of its place in
     // m_objects, like the level's objects have.
     void numberObject(PlayLayer* pl, GameObject* obj);
+    // The level's own startposes hidden from other mods (main.cpp). An object for them to get instead of
+    // `startPos`, made while the level makes its objects (null if it can't be made).
+    GameObject* blankFor(GameObject* startPos);
+    // Once the level has made its objects (after load()): the startposes of `blanks`, each with its blank, to
+    // hide in m_objects too, where Blitzkrieg looks for startposes.
+    void hide(PlayLayer* pl, std::vector<std::pair<GameObject*, GameObject*>> const& blanks);
+    // The blanks in the startposes' places in m_objects (or the startposes back). Only while the game doesn't
+    // go through m_objects itself (restarts, checkpoints, quitting do): main.cpp puts them in for the pause
+    // menu, where Blitzkrieg looks. Storage puts the startposes back while it reads SPs, which refer to
+    // objects by their place.
+    void showBlanks(bool on);
+    bool blanksShown();
+    // The startposes back in m_objects for good, and let go of, if they're `pl`'s (it's going; a level entered
+    // in its place may have hidden its own already).
+    void unhide(PlayLayer* pl);
     // Do nothing in a level whose SPs can't be saved; failures go to the log.
     bool save(StartPoint const& sp);
     void saveNames(std::vector<std::shared_ptr<StartPoint>> const& sps);
@@ -62,7 +77,8 @@ namespace storage {
     void removeAll();
 #endif
     // The level is left: its folder goes if nothing is kept for it, no SPs and no versions (with versions,
-    // their "for an older level version" comes from its level.json). Versions without SPs go too.
+    // their "for an older level version" comes from its level.json). Versions without SPs go too. The hidden
+    // startposes are back in m_objects.
     void leave();
 
     // Export and import (Transfer.cpp), in the open level.

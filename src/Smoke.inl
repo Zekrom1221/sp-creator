@@ -87,6 +87,13 @@ struct SmokeTest {
     // The level's Low Detail Mode as it was, given back at the end.
     Ref<GJGameLevel> level;
     std::optional<bool> lowDetailWas;
+    // "resave": a level's string and version before the editor first saved it, given back at the end.
+    struct Resaved {
+        Ref<GJGameLevel> level;
+        gd::string string;
+        int version = 0;
+    };
+    std::optional<Resaved> beforeResave;
     // A script ("actions"): steps run one after another, each logged (see nextAction).
     std::vector<std::string> actions;
     size_t actionAt = 0;
@@ -516,6 +523,12 @@ void restoreSmokeLevel() {
     auto& t = g_smoke;
     if (t.level && t.lowDetailWas) t.level->m_lowDetailModeToggled = *t.lowDetailWas;
     t.lowDetailWas.reset();
+    if (auto const& r = t.beforeResave) {
+        r->level->m_levelString = r->string;
+        r->level->m_levelVersion = r->version;
+        log::info("Smoke test: resave: the level is as it was");
+    }
+    t.beforeResave.reset();
 }
 
 // What made a version, for the log.
@@ -1487,6 +1500,20 @@ void smokeDescribe(std::string const& tag) {
     log::info("Smoke test: STATE {}: root {}, level {}, {} SPs [{}], active {}, files [{}] ({} KB, {} not compressed), "
         "names {}, versions {} [{}]", tag, g_smoke.storageRoot, key, sps.size(), fmt::join(sps, "; "), activeLabel(),
         fmt::join(files, ", "), bytes / 1024, older, names, versions.size(), fmt::join(versions, "; "));
+    // What Blitzkrieg finds: the StartPosObjects in m_objects. And the level's string, which the editor writes anew.
+    if (auto pl = PlayLayer::get()) {
+        int startPoses = 0, ofSPs = 0;
+        for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+            if (auto spo = typeinfo_cast<StartPosObject*>(obj)) {
+                startPoses++;
+                ofSPs += spOf(spo) != nullptr;
+            }
+        }
+        std::string_view s(pl->m_level->m_levelString.c_str(), pl->m_level->m_levelString.size());
+        auto start = !pl->m_startPosObject ? "none" : spOf(pl->m_startPosObject) ? "of an SP" : "its own";
+        log::info("Smoke test: STATE {}: {} startposes in m_objects ({} of SPs), the level's startpos {}, string {} bytes, "
+            "hash {:016x}", tag, startPoses, ofSPs, start, s.size(), std::hash<std::string_view>{}(s));
+    }
 }
 
 GJGameLevel* smokeLevel(std::string const& what) {
@@ -1513,6 +1540,42 @@ void smokeEnter(GJGameLevel* level) {
     afterFrames(150, [] {
         log::info("Smoke test: entering \"{}\"", g_smoke.level->m_levelName);
         CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false, false));
+    });
+}
+
+// Out of the level into the editor, and back the way its Save and Play goes: the editor writes the level's
+// string anew. `edit`: one object moved first, a change to the level.
+void smokeResave(bool edit) {
+    auto& t = g_smoke;
+    if (!t.beforeResave) t.beforeResave = SmokeTest::Resaved{t.level, t.level->m_levelString, t.level->m_levelVersion};
+    t.reentering = true;
+    t.wait = SmokeTest::Wait::None;
+    t.stepsLeft = -1;
+    t.placeAtX.clear();
+    t.placed = 0;
+    if (auto pl = PlayLayer::get()) pl->onQuit();
+    afterFrames(150, [edit] {
+        log::info("Smoke test: resave: into the editor");
+        CCDirector::get()->replaceScene(LevelEditorLayer::scene(g_smoke.level, false));
+        afterFrames(150, [edit] {
+            auto editor = LevelEditorLayer::get();
+            if (!editor) {
+                log::error("Smoke test: resave: no editor");
+                return finishSmokeTest();
+            }
+            if (edit && editor->m_objects->count() > 10) {
+                auto obj = static_cast<GameObject*>(editor->m_objects->objectAtIndex(10));
+                obj->setPosition(obj->getPosition() + CCPoint(0, 30));
+                log::info("Smoke test: resave: object {} (ID {}) moved up", 10, obj->m_objectID);
+            }
+            // As EditorPauseLayer::saveLevel writes it, in memory only: that one writes CCLocalLevels.dat too.
+            gd::string before = g_smoke.level->m_levelString;
+            g_smoke.level->m_levelString = ZipUtils::compressString(editor->getLevelString(), false, 0);
+            log::info("Smoke test: resave: the level's string {} ({} -> {} bytes), {} objects; save and play",
+                before == g_smoke.level->m_levelString ? "the same" : "written anew", before.size(),
+                g_smoke.level->m_levelString.size(), editor->m_objects->count());
+            CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false, false));
+        });
     });
 }
 
@@ -1861,6 +1924,33 @@ void nextAction() {
     if (op == "rename") {
         auto nameAt = rest.find(':');
         return smokeRename(static_cast<size_t>(arg(0, 0)), nameAt == std::string::npos ? std::string() : rest.substr(nameAt + 1));
+    }
+    if (op == "resave") return smokeResave(rest == "edit");
+    // The pause menu, and out of it through its buttons.
+    if (op == "pause") {
+        t.pausing = true;
+        pl->pauseGame(false);
+        t.pausing = false;
+        return afterFrames(20, nextAction);
+    }
+    // Out of the level from the pause menu into the main menu, past onQuit: the test ends there.
+    if (op == "pause_menu") {
+        log::info("Smoke test: into the main menu, the level not quit");
+        CCDirector::get()->replaceScene(MenuLayer::scene(false));
+        return afterFrames(120, finishSmokeTest);
+    }
+    if (op == "resume" || op == "pause_restart" || op == "pause_practice" || op == "pause_normal") {
+        auto pause = CCScene::get()->getChildByType<PauseLayer>(0);
+        if (!pause) log::error("Smoke test: no pause menu");
+        else if (op == "resume") pause->onResume(nullptr);
+        else if (op == "pause_restart") pause->onRestart(nullptr);
+        else if (op == "pause_practice") pause->onPracticeMode(nullptr);
+        else pause->onNormalMode(nullptr);
+        return afterFrames(30, nextAction);
+    }
+    if (op == "switchers") {
+        logSwitchers(rest);
+        return next();
     }
     if (op == "damage") {
         // The file of SP i made wrong inside (storage::variantOf), for the next load to set aside or read.

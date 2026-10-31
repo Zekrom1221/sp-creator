@@ -35,8 +35,8 @@ install it from Geode's mod list.
 | `Delete` | Delete the SP you start from |
 
 The **SP** button in the pause menu lists your SPs: play from one, rename, delete one or several at once. The
-keys, the auto part length, whether your clicks in the auto part count, and the language are in the mod's
-settings.
+keys, the auto part length, whether your clicks in the auto part count, whether other mods see the level's own
+startposes, and the language are in the mod's settings.
 
 Only classic levels: platformer levels have no SPs.
 
@@ -53,16 +53,19 @@ Only classic levels: platformer levels have no SPs.
   deleted on its own.
 - **Level updates.** When a level is updated, your SPs are moved over to the new version. One that depends
   on objects the update took away stays in **Versions** only: the message says where it was, so you can place
-  it again. This is for online levels: when you edit your own level, its SPs aren't moved over, and it starts
-  with none (the old ones stay in **SP storage**).
+  it again. This is for online levels: when you change the objects of your own level, its SPs aren't moved
+  over, and it starts with none (the old ones stay in **SP storage**). Saving it without changes keeps them.
 - **SP storage** in the mod's settings lists the SPs and versions of all levels, the biggest first, to delete
   what you don't need.
 
 ## With other mods
 
-- **Startpos switchers** (Startpos Switcher, Mega Hack) list your SPs with the level's startposes. An SP placed
-  in the current visit goes to the end of their list until you enter the level again. After deleting or
-  replacing SPs, their list may keep a few extra places until then: those take you to the level start.
+- **The level's own startposes** are hidden from other mods, so their switchers and Blitzkrieg have only your
+  SPs. The level still starts where it does. To see them in other mods too, turn off *Hide the level's
+  startposes* in the settings, then enter the level again.
+- **Startpos switchers** (Startpos Switcher, Mega Hack) list your SPs. An SP placed in the current visit goes
+  to the end of their list until you enter the level again. After deleting or replacing SPs, their list may
+  keep a few extra places until then: those take you to the level start.
 - **Mega Hack**: on rated levels its switcher is off unless you turn on *Allow Rated* in the StartPos Switcher
   options.
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with *Bind

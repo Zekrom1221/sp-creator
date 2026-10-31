@@ -55,6 +55,12 @@
             "name": "SP switcher keys",
             "description": "Switch SPs with the two keys below. Other startpos switchers see the SPs too: turn this off if you switch with one of them."
         },
+        "hide-level-startposes": {
+            "type": "bool",
+            "default": true,
+            "name": "Hide the level's startposes",
+            "description": "Other mods (startpos switchers, Blitzkrieg) see only your SPs, not the startposes the level has. The level still starts where it does. Applies when you next enter a level."
+        },
         "prev-sp": {
             "type": "keybind",
             "default": "OEMComma",

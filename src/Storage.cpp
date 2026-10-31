@@ -90,6 +90,59 @@ struct Level {
 // The open level's folder name, set before load() can give up on it (its SPs not loaded, nor saved).
 std::string g_openKey;
 
+// The level's own startposes hidden from other mods (storage::hide()): while the blanks are in m_objects, a
+// blank object stands in the place of each.
+struct Hidden {
+    unsigned int index = 0;
+    Ref<GameObject> real, blank;
+};
+struct HiddenObjects {
+    Ref<CCArray> objects;  // the level's m_objects
+    std::vector<Hidden> hidden;
+    bool blanksIn = false;  // storage::showBlanks()
+    int shown = 0;          // RealObjects alive
+};
+// Never destroyed: released at exit, after cocos, the objects could crash it (as standIn()'s).
+HiddenObjects& g_hidden = *new HiddenObjects();
+
+// The blanks or the startposes in their places in m_objects, where the other one is: anything else there
+// (m_objects changed under them) stays. One object in the place of another: CCArray's replaceObjectAtIndex
+// would move all those after it twice.
+void putHidden(bool blanks) {
+    auto objects = g_hidden.objects.data();
+    if (!objects) return;
+    for (auto const& h : g_hidden.hidden) {
+        if (h.index >= objects->count()) continue;
+        auto& slot = objects->data->arr[h.index];
+        CCObject* from = blanks ? h.real.data() : h.blank.data();
+        CCObject* to = blanks ? h.blank.data() : h.real.data();
+        if (slot != from) continue;
+        to->retain();
+        slot->release();
+        slot = to;
+    }
+}
+
+// The level's objects in their places in m_objects for as long as it lives, those hidden from other mods
+// too: SPs refer to objects by their place.
+class RealObjects {
+public:
+    RealObjects() {
+        if (g_hidden.shown++ == 0 && g_hidden.blanksIn) putHidden(false);
+    }
+    ~RealObjects() {
+        if (--g_hidden.shown == 0 && g_hidden.blanksIn) putHidden(true);
+    }
+    RealObjects(RealObjects const&) = delete;
+    RealObjects& operator=(RealObjects const&) = delete;
+};
+
+// The hidden startposes back in their places, for good.
+void showHidden() {
+    putHidden(false);
+    g_hidden = HiddenObjects();
+}
+
 // A persistenceAPI::Stream in memory: an SP file's body is compressed, so it's written and read here, not in
 // the file. PersistenceAPI reads and writes through its std::fstream only, which gets a buffer in memory.
 class MemoryStream : public Stream {
@@ -147,20 +200,6 @@ uint64_t hashBytes(void const* data, size_t size, uint64_t h = FNV_OFFSET) {
     return h;
 }
 
-// Main and online levels by their ID; editor levels by their content, so an edit leaves the SPs behind
-// like an update does.
-std::string levelKey(GJGameLevel* level) {
-    int id = level->m_levelID.value();
-    switch (level->m_levelType) {
-        case GJLevelType::Main: return fmt::format("main-{}", id);
-        case GJLevelType::Editor: {
-            auto const& s = level->m_levelString;
-            return fmt::format("editor-{:016x}", hashBytes(s.c_str(), s.size()));
-        }
-        default: return id > 0 ? fmt::format("online-{}", id) : std::string();
-    }
-}
-
 // Low Detail Mode leaves the level's high detail objects out (8063 of BPATA's 96395), and checkpoints refer
 // to objects by their place: SPs only fit the mode they were placed in, so each mode has its own. Levels
 // without the mode's option keep one set. With the mode off the folder keeps the plain key (older SPs).
@@ -214,30 +253,59 @@ bool sameGame(matjson::Value const& saved, matjson::Value const& now) {
     return true;
 }
 
-// The objects as the level created them, before anything moves them: kind, start position, rotation,
-// scale and flip, groups. Not a trigger's settings: one changed where it stands stays the same object, and
-// what it was doing at an SP goes on as it was, as the rest of the SP's state does.
+// An object as the level created it, before anything moves it: kind, start position, rotation (unless
+// `rotation` is false), scale and flip, groups. Not a trigger's settings: one changed where it stands stays the
+// same object, and what it was doing at an SP goes on as it was, as the rest of the SP's state does.
+uint64_t printOf(GameObject* obj, bool rotation) {
+    uint64_t h = FNV_OFFSET;
+    auto add = [&h](auto const& value) { h = hashBytes(&value, sizeof(value), h); };
+    add(obj->m_objectID);
+    add(obj->m_startPosition.x);
+    add(obj->m_startPosition.y);
+    if (rotation) {
+        add(obj->m_startRotationX);
+        add(obj->m_startRotationY);
+    }
+    add(obj->m_startScaleX);
+    add(obj->m_startScaleY);
+    add(obj->m_startFlipX);
+    add(obj->m_startFlipY);
+    if (obj->m_groups) {
+        for (int i = 0; i < obj->m_groupCount && i < static_cast<int>(obj->m_groups->size()); i++) add((*obj->m_groups)[i]);
+    }
+    return h;
+}
+
 std::vector<ObjectPrint> printsOf(PlayLayer* pl) {
     std::vector<ObjectPrint> out;
     out.reserve(pl->m_objects->count());
     for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
-        uint64_t h = FNV_OFFSET;
-        auto add = [&h](auto const& value) { h = hashBytes(&value, sizeof(value), h); };
-        add(obj->m_objectID);
-        add(obj->m_startPosition.x);
-        add(obj->m_startPosition.y);
-        add(obj->m_startRotationX);
-        add(obj->m_startRotationY);
-        add(obj->m_startScaleX);
-        add(obj->m_startScaleY);
-        add(obj->m_startFlipX);
-        add(obj->m_startFlipY);
-        if (obj->m_groups) {
-            for (int i = 0; i < obj->m_groupCount && i < static_cast<int>(obj->m_groups->size()); i++) add((*obj->m_groups)[i]);
-        }
-        out.push_back({h, static_cast<uint16_t>(obj->m_objectID)});
+        out.push_back({printOf(obj, true), static_cast<uint16_t>(obj->m_objectID)});
     }
     return out;
+}
+
+// Main and online levels by their ID; editor levels by their objects, so an edit leaves the SPs behind like an
+// update does. Not by the level's string: the game writes it anew whenever the level is saved, changed or not,
+// and with it the objects' rotations, a hundredth of a degree off each time (BPATA's -8.77 then -8.76, -8.75):
+// those are left out. So are the high detail objects, which Low Detail Mode leaves out, and the anticheat
+// spike: one key either way.
+std::string levelKey(PlayLayer* pl) {
+    auto level = pl->m_level;
+    int id = level->m_levelID.value();
+    switch (level->m_levelType) {
+        case GJLevelType::Main: return fmt::format("main-{}", id);
+        case GJLevelType::Editor: {
+            uint64_t h = FNV_OFFSET;
+            for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+                if (obj->m_isHighDetail || obj == pl->m_anticheatSpike) continue;
+                auto print = printOf(obj, false);
+                h = hashBytes(&print, sizeof(print), h);
+            }
+            return fmt::format("editor-{:016x}", h);
+        }
+        default: return id > 0 ? fmt::format("online-{}", id) : std::string();
+    }
 }
 
 // objects.bin: magic, count, a hash and an ID per object, and a hash of all that.
@@ -865,6 +933,7 @@ class RemapOn {
     PlayLayer* m_pl;
     CCArray* m_objects;
     bool m_on = false;
+    RealObjects m_real;
 
 public:
     RemapOn(PlayLayer* pl, CCArray* array, std::vector<bool> standing = {}) : m_pl(pl), m_objects(pl->m_objects) {
@@ -933,6 +1002,7 @@ struct OtherVersion {
 // say) isn't moved over.
 OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
     OtherVersion out;
+    RealObjects real;
     auto info = file::readJson(dir / "level.json");
     if (!g_remapHook || g_level.prints.empty() || info.isErr() || !sameGame(info.unwrap(), g_level.info)) return out;
     auto old = readPrints(dir / PRINTS_FILE);
@@ -1165,7 +1235,8 @@ Loaded load(PlayLayer* pl) {
     Loaded out;
     g_level = {};
     g_openKey.clear();
-    auto plainKey = levelKey(pl->m_level);
+    showHidden();
+    auto plainKey = levelKey(pl);
     if (plainKey.empty()) return out;
     auto key = lowDetail(pl) ? plainKey + std::string(LOW_DETAIL_SUFFIX) : plainKey;
     g_openKey = key;
@@ -1330,6 +1401,8 @@ namespace {
 // The SP's file as save() writes it, for the open level version: sealed with its hash, which readSP checks
 // before PersistenceAPI reads anything.
 Result<ByteVector> fileFor(StartPoint const& sp) {
+    // PersistenceAPI writes references to objects by their unique IDs, not their places: but in case.
+    RealObjects real;
     MemoryStream out;
     writeSP(out, sp);
     if (!out.good()) return Err("can't write it");
@@ -1372,6 +1445,54 @@ bool save(StartPoint const& sp) {
 void numberObject(PlayLayer* pl, GameObject* obj) {
     int index = static_cast<int>(pl->m_objects->indexOfObject(obj));
     if (index >= 0) obj->m_uniqueID = FIRST_OBJECT_ID + index;
+}
+
+GameObject* blankFor(GameObject* startPos) {
+    // Made while the level makes its objects: their unique IDs go on from where they were.
+    auto counter = reinterpret_cast<int*>(geode::base::get() + UNIQUE_ID_COUNTER);
+    int next = *counter;
+    auto blank = GameObject::createWithKey(1);
+    *counter = next;
+    if (!blank) return nullptr;
+    // A decoration, which nothing collides with or draws a hitbox for.
+    blank->m_objectType = GameObjectType::Decoration;
+    // In no section, as the game sees it: going through m_objects it moves objects between their sections.
+    blank->m_innerSectionIndex = blank->m_outerSectionIndex = blank->m_middleSectionIndex = -1;
+    blank->m_uniqueID = startPos->m_uniqueID;
+    blank->setPosition(startPos->getPosition());
+    blank->m_startPosition = startPos->m_startPosition;
+    return blank;
+}
+
+void hide(PlayLayer* pl, std::vector<std::pair<GameObject*, GameObject*>> const& blanks) {
+    showHidden();
+    if (blanks.empty()) return;
+    std::unordered_map<GameObject*, GameObject*> blankOf(blanks.begin(), blanks.end());
+    g_hidden.objects = pl->m_objects;
+    for (unsigned int i = 0; i < pl->m_objects->count(); i++) {
+        auto obj = static_cast<GameObject*>(pl->m_objects->objectAtIndex(i));
+        auto it = blankOf.find(obj);
+        if (it == blankOf.end()) continue;
+        it->second->m_uniqueID = obj->m_uniqueID;
+        g_hidden.hidden.push_back({i, obj, it->second});
+    }
+    log::info("{} startposes of the level hidden from other mods", g_hidden.hidden.size());
+}
+
+void showBlanks(bool on) {
+    if (g_hidden.blanksIn == on) return;
+    g_hidden.blanksIn = on;
+    if (g_hidden.shown == 0) putHidden(on);
+}
+
+bool blanksShown() {
+    return g_hidden.blanksIn && !g_hidden.hidden.empty();
+}
+
+void unhide(PlayLayer* pl) {
+    if (g_hidden.objects.data() != pl->m_objects) return;
+    if (!g_hidden.hidden.empty()) log::info("The level's startposes back in m_objects: it goes");
+    showHidden();
 }
 
 void saveNames(std::vector<std::shared_ptr<StartPoint>> const& sps) {
@@ -1835,6 +1956,8 @@ void removeIfNothingKept(std::filesystem::path const& dir) {
 
 void leave() {
     if (!g_level.dir.empty()) removeIfNothingKept(g_level.dir);
+    // The level lets go of its objects in m_objects.
+    showHidden();
 }
 
 std::vector<StoredLevel> storedLevels() {

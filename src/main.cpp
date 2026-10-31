@@ -1,5 +1,6 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 
@@ -82,6 +83,15 @@ struct Playback {
     float tailX = 0, tailY = 0, tailCam = 0;
 };
 
+// A startpos of the level hidden from other mods while the level creates its objects, and the blank object
+// they get instead.
+struct HiddenStartPos {
+    Ref<StartPosObject> startPos;
+    Ref<GameObject> blank;
+    bool handing = false;  // on its way to the game past other mods' hooks
+    bool handed = false;   // and it got there
+};
+
 // The open level's SPs (Storage.cpp keeps them between sessions).
 struct Session {
     std::vector<std::shared_ptr<StartPoint>> sps;  // sorted by x
@@ -106,6 +116,11 @@ struct Session {
     bool levelTestMode = false;
     int nextId = 1;
     bool creatingObjects = false;                  // the level has started creating its objects
+    // The level's own startposes hidden from other mods while it creates them (the setting, as it was on
+    // entering the level), until storage::hide().
+    bool hiding = false;
+    std::vector<HiddenStartPos> hidden;
+    int handing = 0;                               // of them on their way to the game
     // Placed SPs not written yet: writing one takes ~10 ms, so it waits for a moment without gameplay
     // (restart, pause, quit) instead of stuttering right where the player pressed the key.
     std::vector<std::shared_ptr<StartPoint>> unsaved;
@@ -672,6 +687,10 @@ bool switcherOn() {
     return Mod::get()->getSettingValue<bool>("switcher");
 }
 
+bool hideLevelStartPoses() {
+    return Mod::get()->getSettingValue<bool>("hide-level-startposes");
+}
+
 // After load(): `loaded.sps` may be moved out already, so the count comes apart.
 void notifyLoaded(storage::Loaded const& loaded, size_t count) {
     using storage::Notice;
@@ -859,6 +878,11 @@ class $modify(SPCBaseLayer, GJBaseGameLayer) {
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         if (!isPlayLayer()) return GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto pl = PlayLayer::get();
+        // Played on from the pause menu some way not caught (SPCBlanksOut).
+        if (storage::blanksShown()) {
+            log::warn("Playing with the blanks of the level's startposes in m_objects: the startposes are back");
+            storage::showBlanks(false);
+        }
         if (pl->m_player1 && !pl->m_isPlatformer) {
             // The smoke test plays like a player would: before the mod looks at the step.
             smoke::beforeStep(pl);
@@ -911,9 +935,121 @@ class $modify(SPCPlayer, PlayerObject) {
     }
 };
 
+// Other mods find the level's startposes in PlayLayer::addObject as the level creates them (switchers collect
+// them there), or later in m_objects (Blitzkrieg, from the pause menu). Hidden from them (the setting): the
+// other mods' hooks get a blank object instead, and the game, past them all, the startpos, so the level starts
+// where it did. In the pause menu the blanks take the startposes' places in m_objects too (storage::hide).
+class $modify(SPCHideStartPoses, PlayLayer) {
+    static void onModify(auto& self) {
+        // Before every other mod's hook: what Stub is for, changing what the hooks after it get.
+        if (auto res = self.setHookPriority("PlayLayer::addObject", Priority::Stub); res.isErr()) {
+            log::error("Can't set the priority of the PlayLayer::addObject hook: {}", res.unwrapErr());
+        }
+    }
+
+    void addObject(GameObject* obj) {
+        auto& s = g_session;
+        auto startPos = s.hiding && obj && obj->m_objectID == 31 ? typeinfo_cast<StartPosObject*>(obj) : nullptr;
+        auto blank = startPos ? storage::blankFor(startPos) : nullptr;
+        if (!blank) return PlayLayer::addObject(obj);
+        // By index: another mod's hook may add a startpos itself on the way, one more.
+        size_t i = s.hidden.size();
+        s.hidden.push_back({startPos, blank, true, false});
+        s.handing++;
+        PlayLayer::addObject(blank);
+        s.handing--;
+        s.hidden[i].handing = false;
+        // Another mod's hook kept it from the game (or went past the hook below).
+        if (!s.hidden[i].handed) {
+            log::warn("A startpos of the level at x {:.1f} didn't get to the game past other mods", startPos->getPositionX());
+        }
+    }
+};
+
+// Past every other mod's hook, right before the game: the startpos the blank stands for.
+class $modify(SPCHandStartPoses, PlayLayer) {
+    static void onModify(auto& self) {
+        if (auto res = self.setHookPriority("PlayLayer::addObject", Priority::Replace); res.isErr()) {
+            log::error("Can't set the priority of the PlayLayer::addObject hook: {}", res.unwrapErr());
+        }
+    }
+
+    void addObject(GameObject* obj) {
+        auto& s = g_session;
+        for (size_t i = s.hidden.size(); s.handing > 0 && i-- > 0;) {
+            auto& h = s.hidden[i];
+            if (h.handing && h.blank.data() == obj) {
+                obj = h.startPos.data();
+                h.handed = true;
+                break;
+            }
+        }
+        PlayLayer::addObject(obj);
+    }
+};
+
+// Blitzkrieg looks for startposes in m_objects from the pause menu: the blanks are there for as long as it's
+// open. Not while playing: the game goes through m_objects itself, to restart (moving objects between their
+// sections, which the blanks aren't in), to make checkpoints, to quit. Out again before every other mod's hook
+// on the ways out of the menu, and when the level goes (the game goes through m_objects as it does).
+class $modify(SPCBlanksPause, PauseLayer) {
+    void customSetup() {
+        PauseLayer::customSetup();
+        if (PlayLayer::get()) storage::showBlanks(true);
+    }
+
+    void goEdit() {
+        storage::showBlanks(false);
+        PauseLayer::goEdit();
+    }
+};
+
+class $modify(SPCBlanksOut, PlayLayer) {
+    static void onModify(auto& self) {
+        for (auto name : {"PlayLayer::resetLevel", "PlayLayer::resume", "PlayLayer::resumeAndRestart",
+                 "PlayLayer::togglePracticeMode", "PlayLayer::onQuit", "PlayLayer::PlayLayer"}) {
+            if (auto res = self.setHookPriority(name, Priority::Stub); res.isErr()) {
+                log::error("Can't set the priority of the {} hook: {}", name, res.unwrapErr());
+            }
+        }
+    }
+
+    void resetLevel() {
+        storage::showBlanks(false);
+        PlayLayer::resetLevel();
+    }
+
+    void resume() {
+        storage::showBlanks(false);
+        PlayLayer::resume();
+    }
+
+    void resumeAndRestart(bool fromStart) {
+        storage::showBlanks(false);
+        PlayLayer::resumeAndRestart(fromStart);
+    }
+
+    void togglePracticeMode(bool practiceMode) {
+        storage::showBlanks(false);
+        PlayLayer::togglePracticeMode(practiceMode);
+    }
+
+    void onQuit() {
+        storage::showBlanks(false);
+        PlayLayer::onQuit();
+    }
+
+    // Left some other way too (a new scene in its place). Not onExit: the game calls that to pause.
+    void destructor() {
+        storage::unhide(this);
+        PlayLayer::~PlayLayer();
+    }
+};
+
 class $modify(SPCPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         g_session = Session{};
+        g_session.hiding = hideLevelStartPoses();
         g_sessionCount++;
         g_rec = Recording{};
         g_play = Playback{};
@@ -931,11 +1067,18 @@ class $modify(SPCPlayLayer, PlayLayer) {
     }
 
     void setupHasCompleted() {
-        // The level has created its objects and picked its own startpos, if it has one.
+        // The level has created its objects and picked its own startpos, if it has one. The SPs' objects,
+        // added from here on, aren't hidden.
+        g_session.hiding = false;
         g_session.levelStartPos = m_startPosObject;
         g_session.levelTestMode = m_isTestMode;
         PlayLayer::setupHasCompleted();
         auto loaded = storage::load(this);
+        // After load(), which takes the objects' prints.
+        std::vector<std::pair<GameObject*, GameObject*>> blanks;
+        for (auto const& h : g_session.hidden) blanks.push_back({h.startPos.data(), h.blank.data()});
+        storage::hide(this, blanks);
+        g_session.hidden.clear();
         smoke::loaded(this, loaded);
         g_session.sps = std::move(loaded.sps);
         g_session.nextId = loaded.nextId;
