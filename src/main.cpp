@@ -469,11 +469,48 @@ void endAutoPart(PlayLayer* pl, bool early, geode::Function<void(int index, bool
 }
 
 // Before a step of an attempt that started from an SP.
+// Is the player what the checkpoint makes it: form, size, speed, gravity, direction?
+bool asInCheckpoint(PlayerObject* p, PlayerCheckpoint* c) {
+    return p->m_isShip == c->m_isShip && p->m_isBall == c->m_isBall && p->m_isBird == c->m_isBird && p->m_isDart == c->m_isDart
+        && p->m_isRobot == c->m_isRobot && p->m_isSpider == c->m_isSpider && p->m_isSwing == c->m_isSwing
+        && (p->m_vehicleSize < 1.f) == c->m_isMini && std::abs(p->m_playerSpeed - c->m_playerSpeed) < 0.001f
+        && p->m_isUpsideDown == c->m_isUpsideDown && p->m_isSideways == c->m_isSideways
+        && p->m_isGoingLeft == c->m_isGoingLeft;
+}
+
+// Another mod may change the player after the restart, past the checkpoint: Mega Hack's Smart StartPos gives it
+// the form, speed and size it works out for the startpos (Dash: a cube at 0.9 where the run was a ball at 1.3).
+// The SP's checkpoint wins, before the first step.
+void undoOthersAtSpawn(PlayLayer* pl, StartPoint const& sp) {
+    auto cp = sp.cp.data();
+    if (!cp) return;
+    auto& gs = pl->m_gameState;
+    std::vector<std::string> undone;
+    auto player = [&](PlayerObject* p, PlayerCheckpoint* c, char const* which) {
+        if (!p || !c || asInCheckpoint(p, c)) return;
+        p->loadFromCheckpoint(c);
+        undone.push_back(which);
+    };
+    player(pl->m_player1, cp->m_player1Checkpoint, "player 1");
+    if (gs.m_isDualMode) player(pl->m_player2, cp->m_player2Checkpoint, "player 2");
+    if (gs.m_isFlipped != cp->m_gameState.m_isFlipped) {
+        pl->toggleFlipped(cp->m_gameState.m_isFlipped, true);
+        undone.push_back("mirror");
+    }
+    if (!undone.empty()) {
+        log::info("SP {}: changed after the restart, put back as in its checkpoint: {}", sp.id, fmt::join(undone, ", "));
+    }
+    if (gs.m_isDualMode != cp->m_gameState.m_isDualMode) {
+        log::warn("SP {}: dual changed after the restart, not put back", sp.id);
+    }
+}
+
 void playStep(PlayLayer* pl) {
     auto& pb = g_play;
     auto const& sp = *pb.sp;
     int k = pb.step++;
     if (k == 0) {
+        undoOthersAtSpawn(pl, sp);
         // Loading the checkpoint puts the camera on its target instead of where it was (up to 15 units
         // off in BPATA), and the next frames would ease back from there: start where the run had it.
         auto const& f = sp.frames.front();

@@ -87,6 +87,9 @@ struct SmokeTest {
     // The level's Low Detail Mode as it was, given back at the end.
     Ref<GJGameLevel> level;
     std::optional<bool> lowDetailWas;
+    // "meddle": after each restart from an SP the player is made a mini cube at 0.9, as Mega Hack's Smart StartPos
+    // may make it (the mod puts it back, see undoOthersAtSpawn).
+    bool meddle = false;
     // "resave": a level's string and version before the editor first saved it, given back at the end.
     struct Resaved {
         Ref<GJGameLevel> level;
@@ -1952,6 +1955,14 @@ void nextAction() {
         logSwitchers(rest);
         return next();
     }
+    if (op == "meddle") {
+        t.meddle = rest == "on";
+        return next();
+    }
+    if (op == "shot") {
+        captureScreen(rest + ".png");
+        return next();
+    }
     if (op == "damage") {
         // The file of SP i made wrong inside (storage::variantOf), for the next load to set aside or read.
         size_t i = static_cast<size_t>(arg(0, 0));
@@ -2139,6 +2150,25 @@ void ready(PlayLayer* pl) {
 void restarted(PlayLayer* pl) {
     if (g_smoke.active) g_smoke.refIndex = -1;  // the bot finds its place in the run again
     if (g_smoke.externalOn) logRestart(pl, "restart");
+    if (g_smoke.meddle && g_play.sp) {
+        auto p = pl->m_player1;
+        if (p->m_isShip) p->toggleFlyMode(false, true);
+        else if (p->m_isBall) p->toggleRollMode(false, true);
+        else if (p->m_isBird) p->toggleBirdMode(false, true);
+        else if (p->m_isDart) p->toggleDartMode(false, true);
+        else if (p->m_isRobot) p->toggleRobotMode(false, true);
+        else if (p->m_isSpider) p->toggleSpiderMode(false, true);
+        p->togglePlayerScale(true, true);
+        p->m_playerSpeed = 0.9f;
+        log::info("Smoke test: SP {} restart, meddled with: player {}", g_play.sp->id, modeOf(pl));
+    }
+    // What the player starts as from an SP, and the settings its startpos has (another mod may set them).
+    if (auto sp = g_play.sp; sp && sp->object && sp->object->m_startSettings) {
+        auto st = sp->object->m_startSettings;
+        log::info("Smoke test: SP {} restart: player {}, its startpos: mode {} speed {} mini {} flipped {} dual {} mirror {}",
+            sp->id, modeOf(pl), st->m_startMode, static_cast<int>(st->m_startSpeed), st->m_startMini, st->m_isFlipped,
+            st->m_startDual, st->m_mirrorMode);
+    }
 }
 
 bool hit(PlayLayer* pl, PlayerObject* player, GameObject* object) {
