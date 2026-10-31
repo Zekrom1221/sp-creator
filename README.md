@@ -53,8 +53,10 @@ Only classic levels: platformer levels have no SPs.
   deleted on its own.
 - **Level updates.** When a level is updated, your SPs are moved over to the new version. One that depends
   on objects the update took away stays in **Versions** only: the message says where it was, so you can place
-  it again. This is for online levels: when you change the objects of your own level, its SPs aren't moved
-  over, and it starts with none (the old ones stay in **SP storage**). Saving it without changes keeps them.
+  it again.
+- **Your own levels.** If you change the objects of your own level in the editor (move, add or delete even one),
+  its SPs aren't moved over: the level starts with no SPs, and the old ones stay in **SP storage**, where you can
+  delete them. Saving it without changes keeps its SPs.
 - **SP storage** in the mod's settings lists the SPs and versions of all levels, the biggest first, to delete
   what you don't need.
 
@@ -67,7 +69,7 @@ Only classic levels: platformer levels have no SPs.
   to the end of their list until you enter the level again. After deleting or replacing SPs, their list may
   keep a few extra places until then: those take you to the level start.
 - **Mega Hack**: on rated levels its switcher is off unless you turn on *Allow Rated* in the StartPos Switcher
-  options.
+  options. *Smart StartPos* can stay on: SPs start the way you placed them.
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with *Bind
   profile* on: editing a profile keeps its old startposes.
 

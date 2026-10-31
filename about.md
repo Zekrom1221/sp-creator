@@ -30,9 +30,11 @@ need: nothing is deleted on its own.
 SPs that a version holds already aren't saved twice: that version moves to the top instead.
 
 When a level is updated, your SPs are moved over to the new version. One that depends on objects the update
-took away stays in <cy>Versions</c> only: the message says where it was, so you can place it again. This is for
-online levels: when you change the objects of your own level, its SPs aren't moved over. Saving it without
-changes keeps them.
+took away stays in <cy>Versions</c> only: the message says where it was, so you can place it again.
+
+**Your own level**: if you change its objects in the editor (move, add or delete even one), its SPs aren't moved
+over. It starts with no SPs, and the old ones stay in <cy>SP storage</c>, where you can delete them. Saving it
+without changes keeps its SPs.
 
 <cy>SP storage</c> in the mod's settings lists the SPs and versions of all levels, the biggest first. Pick levels,
 or SPs and versions of one level, and delete them to free up space.
@@ -46,7 +48,7 @@ or SPs and versions of one level, and delete them to free up space.
   the end of their list until you enter the level again. After deleting or replacing SPs, their list may keep a
   few extra places until then: those take you to the level start.
 - **Mega Hack**: on rated levels its switcher is off unless you turn on <cy>Allow Rated</c> in the StartPos
-  Switcher options.
+  Switcher options. <cy>Smart StartPos</c> can stay on: SPs start the way you placed them.
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with
   <cy>Bind profile</c> on: editing a profile keeps its old startposes.
 
