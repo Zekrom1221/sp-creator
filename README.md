@@ -70,7 +70,7 @@ Only classic levels: platformer levels have no SPs.
   to the end of their list until you enter the level again. After deleting or replacing SPs, their list may
   keep a few extra places until then: those take you to the level start.
 - **Mega Hack**: on rated levels its switcher is off unless you turn on *Allow Rated* in the StartPos Switcher
-  options. *Smart StartPos* can stay on: SPs start the way you placed them.
+  options. Turn off its *Smart StartPos* for now (see Known issues).
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with *Bind
   profile* on: editing a profile keeps its old startposes.
 
@@ -82,6 +82,8 @@ Only classic levels: platformer levels have no SPs.
 - SPs placed in a copy of a level (one of your own levels) with Low Detail Mode on may not import for someone
   else: they get *These SPs are for Low Detail Mode off* or *These SPs are for another version of this level*.
   Until this is fixed, place and import such SPs with Low Detail Mode off on both sides.
+- With Mega Hack's *Smart StartPos* on, some SPs start in the wrong mode: a robot instead of a cube, or in a dual,
+  the second player in the wrong mode. Until this is fixed, turn Smart StartPos off.
 
 ## Building
 
