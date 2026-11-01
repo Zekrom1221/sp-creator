@@ -70,7 +70,8 @@ Only classic levels: platformer levels have no SPs.
   to the end of their list until you enter the level again. After deleting or replacing SPs, their list may
   keep a few extra places until then: those take you to the level start.
 - **Mega Hack**: on rated levels its switcher is off unless you turn on *Allow Rated* in the StartPos Switcher
-  options. Turn off its *Smart StartPos* for now (see Known issues).
+  options. Turn on its *StartPos Reset Camera* (in Cosmetic): without it, the camera can go wrong after starting
+  from an SP. Turn off its *Smart StartPos* for now (see Known issues).
 - **Blitzkrieg** makes stages of your SPs. After adding or deleting SPs, create a new profile with *Bind
   profile* on: editing a profile keeps its old startposes.
 
