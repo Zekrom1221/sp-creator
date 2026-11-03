@@ -88,6 +88,10 @@ Only classic levels: platformer levels have no SPs.
 - **Blitzkrieg**: a profile created after you enter the level again shows 0% for the stages of your SPs. Until
   this is fixed, place or import at least one SP in that visit before you create the profile: that fixes the
   stages of all your SPs.
+- With *Block control in the auto part* off, pressing A or D (move left and right) can end the auto part, though
+  in a classic level these keys do nothing. So with Mega Hack's switcher on A and D, switching to an SP can hand
+  you control at once, without the auto part. Until this is fixed, keep that setting on, or put the switcher on
+  other keys, such as Q and E.
 
 ## Building
 
