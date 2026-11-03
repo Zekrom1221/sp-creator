@@ -86,7 +86,8 @@ Only classic levels: platformer levels have no SPs.
 - With Mega Hack's *Smart StartPos* on, some SPs start in the wrong mode: a robot instead of a cube, or in a dual,
   the second player in the wrong mode. Until this is fixed, turn Smart StartPos off.
 - **Blitzkrieg**: a profile created after you enter the level again shows 0% for the stages of your SPs. Until
-  this is fixed, create the profile in the same visit you placed or imported the SPs in.
+  this is fixed, place or import at least one SP in that visit before you create the profile: that fixes the
+  stages of all your SPs.
 
 ## Building
 
