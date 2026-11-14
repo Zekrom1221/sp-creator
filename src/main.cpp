@@ -146,17 +146,42 @@ constexpr float NOTICE_SECONDS = 1.5f;
 // switching quickly through SPs would show every SP passed on the way, one after another.
 Ref<Notification> g_notice;
 std::chrono::steady_clock::time_point g_noticeAt;
-// It goes by the clock, not by its own timer: that one runs in game time, which a speedhack slows down or
-// speeds up. Shown with no time of its own, it's hidden here NOTICE_SECONDS after it came on screen.
+// It goes by the clock, not by game time, which a speedhack slows down or speeds up (Eclipse's scales the
+// scheduler's time). Shown with no time of its own, it's hidden here NOTICE_SECONDS after it came on screen;
+// and its animations (Geode's fading in and out, actions on it and its parts) run by the clock too.
 std::chrono::steady_clock::time_point g_noticeHideAt;
-bool g_noticeSeen = false;   // came on screen (Geode shows notifications one at a time: it may wait its turn)
-bool g_noticeTimed = false;  // the clock check is queued
+bool g_noticeSeen = false;    // came on screen (Geode shows notifications one at a time: it may wait its turn)
+bool g_noticeHidden = false;  // hidden by the clock: fading out
+bool g_noticeTimed = false;   // the clock check is queued
 constexpr auto NOTICE_TIME = std::chrono::milliseconds(static_cast<int>(NOTICE_SECONDS * 1000));
 constexpr auto NOTICE_STALE = std::chrono::seconds(5);  // still waiting its turn by then: not worth showing
 
-// Once a frame (queueInMainThread runs what's queued meanwhile in the next frame), till it's hidden.
-void hideNoticeOnTime() {
+// The actions of the mod's notifications, ticked by the clock (noticeFrame) instead of the game's scheduler.
+class ClockActions : public CCActionManager {
+public:
+    void tick(float dt) {
+        update(dt);
+    }
+};
+Ref<ClockActions> g_noticeActions;
+std::chrono::steady_clock::time_point g_noticeTickedAt;
+
+// Before it runs any: a node's actions go to the manager it has as they're added.
+void useClockActions(CCNode* node) {
+    if (!g_noticeActions) {
+        g_noticeActions = new ClockActions();
+        g_noticeActions->release();  // the Ref has it
+    }
+    node->setActionManager(g_noticeActions);
+    for (auto child : CCArrayExt<CCNode*>(node->getChildren())) useClockActions(child);
+}
+
+// Once a frame (queueInMainThread runs what's queued meanwhile in the next frame), till the notification is
+// off the screen: its animations a frame on by the clock, and hidden on time.
+void noticeFrame() {
     auto now = std::chrono::steady_clock::now();
+    if (g_noticeActions) g_noticeActions->tick(std::chrono::duration<float>(now - g_noticeTickedAt).count());
+    g_noticeTickedAt = now;
     if (!g_notice) {
         g_noticeTimed = false;
         return;
@@ -164,18 +189,18 @@ void hideNoticeOnTime() {
     if (g_notice->isShowing()) {
         if (!g_noticeSeen) g_noticeHideAt = now + NOTICE_TIME;
         g_noticeSeen = true;
-        if (now >= g_noticeHideAt) {
-            g_noticeTimed = false;
-            return g_notice->hide();
+        if (!g_noticeHidden && now >= g_noticeHideAt) {
+            g_noticeHidden = true;
+            g_notice->hide();
         }
     }
     else if (g_noticeSeen || now - g_noticeAt > NOTICE_STALE) {
-        // Gone (hidden, cancelled), or never came on.
+        // Gone (faded out, cancelled), or never came on.
         if (!g_noticeSeen) g_notice->cancel();
         g_noticeTimed = false;
         return;
     }
-    Loader::get()->queueInMainThread(hideNoticeOnTime);
+    Loader::get()->queueInMainThread(noticeFrame);
 }
 
 void timeNotice(std::chrono::steady_clock::time_point now) {
@@ -183,7 +208,8 @@ void timeNotice(std::chrono::steady_clock::time_point now) {
     g_noticeHideAt = now + NOTICE_TIME;
     if (g_noticeTimed) return;
     g_noticeTimed = true;
-    Loader::get()->queueInMainThread(hideNoticeOnTime);
+    g_noticeTickedAt = now;
+    Loader::get()->queueInMainThread(noticeFrame);
 }
 
 // Notification has its label in bigFont, which has no Cyrillic letters: text that needs the mod's font
@@ -225,18 +251,22 @@ void notify(std::string const& text, NotificationIcon icon = NotificationIcon::I
     smoke::noticed(text);
     auto now = std::chrono::steady_clock::now();
     // On screen and not fading out yet: change it in place, its time starting over.
-    if (g_notice && g_notice->isShowing() && g_noticeTimed && g_noticeHideAt - now > NOTICE_TIME / 5) {
+    if (g_notice && g_notice->isShowing() && g_noticeTimed && !g_noticeHidden && g_noticeHideAt - now > NOTICE_TIME / 5) {
         setNoticeText(g_notice, text);
         g_notice->setIcon(icon);
+        useClockActions(g_notice);  // parts made anew
         timeNotice(now);
         return;
     }
-    // Still waiting in the queue: drop it; fading out: let it go.
-    if (g_notice) g_notice->cancel();
-    // Time 0: no timer of its own (hideNoticeOnTime).
+    // Still waiting in the queue: drop it; fading out: let it go (its actions still ticked by noticeFrame, as
+    // long as the new one waits its turn).
+    if (g_notice && !g_noticeHidden) g_notice->cancel();
+    // Time 0: no timer of its own (noticeFrame).
     g_notice = Notification::create(text, icon, 0.f);
     setNoticeText(g_notice, text);
+    useClockActions(g_notice);
     g_noticeSeen = false;
+    g_noticeHidden = false;
     g_notice->show();
     timeNotice(now);
 }

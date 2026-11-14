@@ -1734,7 +1734,7 @@ void smokeNoticeClock() {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t.noticeStart)
         .count();
     if (t.noticeSeenMs < 0 && g_notice && g_notice->isShowing()) t.noticeSeenMs = ms;
-    if (t.noticeHiddenMs < 0 && !g_noticeTimed) t.noticeHiddenMs = ms;
+    if (t.noticeHiddenMs < 0 && (g_noticeHidden || !g_noticeTimed)) t.noticeHiddenMs = ms;
     bool gone = t.noticeSeenMs < 0 ? !g_noticeTimed : (!g_notice || !g_notice->getParent());
     if (!gone && ms < 20000) return Loader::get()->queueInMainThread(smokeNoticeClock);
     log::info("Smoke test: NOTICE at time scale {:.2f}: on screen after {} ms, hiding after {} ms, gone after {} ms "
