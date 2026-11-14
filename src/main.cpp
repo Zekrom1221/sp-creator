@@ -318,10 +318,14 @@ CCPoint objectPosition(StartPoint const& sp) {
 
 // Restarts move objects back to where they started, which for the SPs' objects (added by the mod, not
 // loaded with the level) is 0,0 in some levels (Jumper). setStartPos would fix that, but then the player
-// crashes into the object (BPATA): they're put back in place after each restart instead.
+// crashes into the object (BPATA): they're put back in place after each restart instead, and after each
+// frame's visibility pass (postUpdate), which does the same to objects added on entering the level: their
+// stages in Blitzkrieg were at 0.00% after entering the level again.
 void placeObjects() {
     for (auto const& sp : g_session.sps) {
-        if (sp->object) sp->object->setPosition(objectPosition(*sp));
+        if (!sp->object) continue;
+        auto at = objectPosition(*sp);
+        if (sp->object->getPosition() != at) sp->object->setPosition(at);
     }
 }
 
@@ -349,6 +353,10 @@ void addObjectFor(PlayLayer* pl, StartPoint& sp) {
         log::error("SP {}: no startpos object", sp.id);
         return;
     }
+    // No enter effects ("Don't Enter"): they put an object at its start position, 0,0 for the SPs' (see
+    // placeObjects), every frame for the objects added on entering, till a restart from an SP.
+    obj->m_isDontEnter = true;
+    obj->m_ignoreEnter = true;
     obj->setPosition(objectPosition(sp));
     auto startPos = pl->m_startPosObject;
     bool testMode = pl->m_isTestMode;
@@ -1164,6 +1172,13 @@ class $modify(SPCPlayLayer, PlayLayer) {
         for (auto const& sp : g_session.sps) addObjectFor(this, *sp);
         notifyLoaded(loaded, g_session.sps.size());
         smoke::ready(this);
+    }
+
+    // The game's visibility pass (updateVisibility, in here) may put the SPs' objects back at their start
+    // position, 0,0 (see placeObjects): after it, they're put where they stand again.
+    void postUpdate(float dt) {
+        PlayLayer::postUpdate(dt);
+        placeObjects();
     }
 
     void resetLevel() {

@@ -2006,6 +2006,22 @@ void nextAction() {
         return smokeDeleteUI(0, args.empty() ? "all" : args[0], args.size() > 1 && args[1] == "save");
     }
     if (op == "list_scroll") return smokeListScroll(0);
+    // What Blitzkrieg's profile would get (v2.3.5 findStartposesFromCurrentLevel, by x, its default): each
+    // StartPosObject in m_objects, its x against the level length; where the object starts from too.
+    if (op == "blitz_probe") {
+        std::vector<std::string> found;
+        for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+            if (auto spo = typeinfo_cast<StartPosObject*>(obj)) {
+                auto sp = spOf(spo);
+                found.push_back(fmt::format("{:.2f}% x {:.1f} start {:.1f} game {:.1f},{:.1f}{}",
+                    spo->getPositionX() / pl->m_levelLength * 100.f, spo->getPositionX(), spo->m_startPosition.x,
+                    spo->m_positionX, spo->m_positionY, sp ? fmt::format(" (SP {}, {:.2f}%)", sp->id, sp->percent) : ""));
+            }
+        }
+        log::info("Smoke test: BLITZ {}: {} startposes [{}], level length {:.1f}, paused {}", rest, found.size(),
+            fmt::join(found, "; "), pl->m_levelLength, pl->m_isPaused);
+        return next();
+    }
     // A notification with the game's time scaled (as a speedhack does): it stays NOTICE_SECONDS by the clock.
     if (op == "notice_clock") {
         auto scheduler = CCDirector::get()->getScheduler();
