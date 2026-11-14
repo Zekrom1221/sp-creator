@@ -1831,6 +1831,22 @@ void nextAction() {
             pl->m_player1->m_position.x, g_play.sp && g_play.controlling ? "goes on" : "off", before, g_rec.holds[1]);
         return afterFrames(1, nextAction);
     }
+    // Left / right as the game passes them on (Mega Hack's switcher on A and D, Click Between Frames sends them
+    // in classic levels too): "move:left" / "move:right" press, "move:left:up" lets go.
+    if (op == "move") {
+        std::string side = args.empty() ? "" : args[0];
+        if (side != "left" && side != "right") {
+            log::error("Smoke test: move {}: left or right", rest);
+            return next();
+        }
+        int button = side == "left" ? static_cast<int>(PlayerButton::Left) : static_cast<int>(PlayerButton::Right);
+        bool down = args.size() < 2 || args[1] != "up";
+        pl->handleButton(down, button, true);
+        log::info("Smoke test: {} {} at x {:.1f}: auto part {}, held for the handoff {}, held in the game {}", side,
+            down ? "pressed" : "let go", pl->m_player1->m_position.x,
+            g_play.sp && g_play.controlling ? "goes on" : "off", g_play.userHolds[button], g_rec.holds[button]);
+        return afterFrames(1, nextAction);
+    }
     if (op == "from" || op == "fromx") {
         size_t i = static_cast<size_t>(arg(0, 0));
         // fromx: the SP nearest to that x (indices move as SPs come and go).

@@ -936,9 +936,12 @@ class $modify(SPCBaseLayer, GJBaseGameLayer) {
         if (g_play.sp && g_play.controlling && !g_play.injecting) {
             // The auto part owns the buttons: remember what the player holds for the handoff.
             g_play.userHolds[index] = down;
-            // Unless control isn't blocked: then the first press ends the auto part and goes in. From inside this
-            // hook a handleButton call goes to the hooks after this one, so the buttons are recorded here.
-            if (down && !blockInput()) {
+            // Unless control isn't blocked: then the first jump press ends the auto part and goes in. From inside
+            // this hook a handleButton call goes to the hooks after this one, so the buttons are recorded here.
+            // Left and right don't end it: SPs are for classic levels, where they do nothing, yet they come in
+            // there too (Mega Hack's switcher on A and D, Click Between Frames sends them in any level); they are
+            // handed to the game with the rest at the handoff, as with control blocked.
+            if (down && !blockInput() && button == static_cast<int>(PlayerButton::Jump)) {
                 bool held = g_play.gameHolds[index];
                 endAutoPart(PlayLayer::get(), true, [this](int i, bool down) {
                     bool p1 = i <= 3;
