@@ -1303,6 +1303,9 @@ class $modify(SPCPlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* object) {
+        // Only the level's players: another mod's own (Eclipse's Show Trajectory runs a copy ahead of the player)
+        // die the way the game has them die, the auto part or not.
+        if (player != m_player1 && player != m_player2) return PlayLayer::destroyPlayer(player, object);
         // The anticheat spike is a fake death at the level start.
         if (object != m_anticheatSpike) {
             g_rec.hits++;
