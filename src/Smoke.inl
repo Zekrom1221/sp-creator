@@ -1708,6 +1708,54 @@ void smokeDeleteUI(int stage, std::string picks, bool save) {
     }
 }
 
+// The SP list keeps its scroll when it's rebuilt in place (a delete's confirmation, the delete): scrolled to the
+// end, the last SP deleted, then halfway, a confirmation. Each step logs where the list is scrolled.
+void smokeListScroll(int stage) {
+    auto pl = PlayLayer::get();
+    if (!pl) return finishSmokeTest();
+    auto next = [=](int frames) { afterFrames(frames, [=] { smokeListScroll(stage + 1); }); };
+    auto list = typeinfo_cast<ScrollLayer*>(CCScene::get()->getChildByIDRecursive("sp-rows"_spr));
+    auto top = [list] { return list->getContentHeight() - list->m_contentLayer->getContentHeight(); };
+    auto where = [&](std::string_view what) {
+        if (!list) return log::error("Smoke test: LIST {}: no SP list", what);
+        auto content = list->m_contentLayer;
+        log::info("Smoke test: LIST {}: scrolled down {:.1f} of {:.1f}, {} rows", what, content->getPositionY() - top(),
+            -top(), content->getChildrenCount());
+    };
+    auto last = std::to_string(g_session.sps.size());
+    switch (stage) {
+        case 0:
+            g_smoke.pausing = true;
+            pl->pauseGame(false);
+            g_smoke.pausing = false;
+            return next(20);
+        case 1:
+            if (auto pause = CCScene::get()->getChildByType<PauseLayer>(0)) splist::open(pause);
+            else log::error("Smoke test: no pause menu");
+            return next(30);
+        case 2:
+            where("opened");
+            if (list) list->m_contentLayer->setPositionY(0.f);
+            where("scrolled to the end");
+            pressButton(fmt::format("{}/delete-sp-{}", Mod::get()->getID(), last));
+            return next(10);
+        case 3:
+            where("delete pressed once");
+            pressButton(fmt::format("{}/delete-sp-{}", Mod::get()->getID(), last));
+            return next(10);
+        case 4:
+            where("the last SP deleted");
+            if (list) list->m_contentLayer->setPositionY(top() / 2);
+            where("scrolled halfway");
+            pressButton(fmt::format("{}/delete-sp-{}", Mod::get()->getID(), last));
+            return next(10);
+        case 5:
+            where("delete pressed once, halfway");
+            log::info("Smoke test: LIST: {} SPs", g_session.sps.size());
+            return smokeUIDone();
+    }
+}
+
 void smokeSetting(std::string const& key, std::string const& value) {
     auto mod = Mod::get();
     auto& restores = g_smoke.restores;
@@ -1940,6 +1988,7 @@ void nextAction() {
     if (op == "delete_ui") {
         return smokeDeleteUI(0, args.empty() ? "all" : args[0], args.size() > 1 && args[1] == "save");
     }
+    if (op == "list_scroll") return smokeListScroll(0);
     if (op == "rename") {
         auto nameAt = rest.find(':');
         return smokeRename(static_cast<size_t>(arg(0, 0)), nameAt == std::string::npos ? std::string() : rest.substr(nameAt + 1));

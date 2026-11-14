@@ -19,6 +19,19 @@ namespace {
 
 using namespace ui;
 
+// How far down from its top a list is scrolled. A list rebuilt in place (a delete, its confirmation, a rename)
+// is scrolled as far down again by scrollBack, no further than its end: it doesn't jump back to the top.
+float scrolledDown(ScrollLayer* list) {
+    auto content = list->m_contentLayer;
+    return content->getPositionY() - (list->getContentHeight() - content->getContentHeight());
+}
+
+void scrollBack(ScrollLayer* list, float down) {
+    auto content = list->m_contentLayer;
+    float top = list->getContentHeight() - content->getContentHeight();
+    content->setPositionY(std::clamp(top + down, top, 0.f));
+}
+
 // "SP 3 (45.2%)", or "3. Name (45.2%)".
 std::string caption(std::string const& name, size_t number, float percent) {
     if (name.empty()) return fmt::format("SP {} ({:.1f}%)", number, percent);
@@ -466,6 +479,7 @@ protected:
     std::filesystem::path m_confirming;  // delete pressed once on this version
     geode::Function<void()> m_changed;   // the level's SPs changed
     bool m_stale = false;                // to rebuild once on top
+    bool m_built = false;                // rebuilt since: kept scrolled where it was
 
     void refresh() {
         m_stale = true;
@@ -492,6 +506,7 @@ protected:
         bg->setContentSize({LIST_WIDTH + 6.f, LIST_HEIGHT + 6.f});
         m_mainLayer->addChildAtPosition(bg, Anchor::Center, {0.f, -14.f});
         m_list = ScrollLayer::create({LIST_WIDTH, LIST_HEIGHT});
+        m_list->setID("version-rows"_spr);
         m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(2.f));
         m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {-LIST_WIDTH / 2, -14.f - LIST_HEIGHT / 2});
         this->rebuild();
@@ -563,6 +578,7 @@ protected:
         m_total->limitLabelWidth(LIST_WIDTH, 0.45f, 0.1f);
 
         auto content = m_list->m_contentLayer;
+        float down = m_built ? scrolledDown(m_list) : 0.f;
         content->removeAllChildren();
         for (size_t i = 0; i < versions.size(); i++) content->addChild(this->row(versions[i], i));
         if (versions.empty()) {
@@ -576,7 +592,8 @@ protected:
         float height = std::max(LIST_HEIGHT, (ROW_HEIGHT + 2.f) * content->getChildrenCount());
         content->setContentSize({LIST_WIDTH, height});
         content->updateLayout();
-        m_list->scrollToTop();
+        scrollBack(m_list, down);
+        m_built = true;
         handleTouchPriority(this);
     }
 
@@ -659,6 +676,7 @@ protected:
     ScrollLayer* m_list = nullptr;
     core::SP m_confirming;  // delete pressed once on this SP
     bool m_stale = false;   // to rebuild once on top
+    bool m_built = false;   // rebuilt since: kept scrolled where it was
 
 public:
     void refresh() {
@@ -685,6 +703,7 @@ protected:
         m_mainLayer->addChildAtPosition(bg, Anchor::Center, {0.f, 3.f});
 
         m_list = ScrollLayer::create({LIST_WIDTH, LIST_HEIGHT});
+        m_list->setID("sp-rows"_spr);
         m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(2.f));
         m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {-LIST_WIDTH / 2, 3.f - LIST_HEIGHT / 2});
 
@@ -781,6 +800,8 @@ protected:
             auto remove = CCMenuItemExt::createSpriteExtraWithFrameName("GJ_trashBtn_001.png", 0.55f, [this, sp](auto) {
                 this->onDelete(sp);
             });
+            rename->setID(fmt::format("{}/rename-sp-{}", Mod::get()->getID(), number));
+            remove->setID(fmt::format("{}/delete-sp-{}", Mod::get()->getID(), number));
             menu->addChild(rename);
             menu->addChild(remove);
         }
@@ -791,6 +812,7 @@ protected:
 
     void rebuild() {
         auto content = m_list->m_contentLayer;
+        float down = m_built ? scrolledDown(m_list) : 0.f;
         content->removeAllChildren();
         content->addChild(this->row(nullptr, 0));
         auto const& sps = core::sps();
@@ -807,7 +829,8 @@ protected:
         float height = std::max(LIST_HEIGHT, (ROW_HEIGHT + 2.f) * content->getChildrenCount());
         content->setContentSize({LIST_WIDTH, height});
         content->updateLayout();
-        m_list->scrollToTop();
+        scrollBack(m_list, down);
+        m_built = true;
         handleTouchPriority(this);
     }
 
