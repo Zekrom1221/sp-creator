@@ -9,5 +9,7 @@ call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\v
 set GEODE_SDK=C:\Users\User\geode-sdk
 set PATH=%LOCALAPPDATA%\Microsoft\WinGet\Packages\GeodeSDK.GeodeCLI_Microsoft.Winget.Source_8wekyb3d8bbwe;%PATH%
 cd /d "%~dp0"
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSPC_SMOKE=%SMOKE% || exit /b 1
+rem Eclipse Menu's API headers, if it's installed: the smoke test sets its options.
+set ECLIPSE_API=C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash\geode\unzipped\eclipse.eclipse-menu
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSPC_SMOKE=%SMOKE% "-DSPC_ECLIPSE_API=%ECLIPSE_API%" || exit /b 1
 cmake --build build || exit /b 1

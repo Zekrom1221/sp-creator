@@ -15,6 +15,12 @@
 #include "SPList.hpp"
 #include "Transfer.hpp"
 
+// Eclipse Menu's API headers, from the installed mod (build.bat smoke finds them; not part of this repo): the
+// test turns its options on and off as its menu does.
+#ifdef SPC_ECLIPSE_API
+#include <include/config.hpp>
+#endif
+
 #include <fstream>
 #include <set>
 
@@ -50,6 +56,7 @@ struct SmokeTest {
     // notice_clock: a notification shown with the game's time running slower or faster (as with a speedhack).
     std::chrono::steady_clock::time_point noticeStart;
     long long noticeSeenMs = -1;  // when it came on screen
+    long long noticeHiddenMs = -1;  // when the mod started hiding it (it fades out after that)
     float noticeScale = 1.f, noticeWasScale = 1.f;
     bool ui = false;           // look at the mod's UI at the end (pictures in the mod save dir)
     bool uiDone = false;
@@ -80,6 +87,7 @@ struct SmokeTest {
     // level before the update taken back through the Versions list's way; that list, pictured.
     matjson::Value update;
     bool updated = false;
+    bool keepUpdate = false;
     gd::string realLevelString;
     int realLevelVersion = 0;
     bool probe = false;
@@ -94,6 +102,7 @@ struct SmokeTest {
     // "meddle": after each restart from an SP the player is made a mini cube at 0.9, as Mega Hack's Smart StartPos
     // may make it (the mod puts it back, see undoOthersAtSpawn).
     bool meddle = false;
+    bool logRestarts = false;  // "log_restarts:on": every restart, whoever made it (another mod's switcher too)
     // "resave": a level's string and version before the editor first saved it, given back at the end.
     struct Resaved {
         Ref<GJGameLevel> level;
@@ -298,12 +307,18 @@ void smokeUpdate(GJGameLevel* level, matjson::Value const& update) {
         for (size_t i = 0; i < at && i < objects.size(); i++) pos += !gone.contains(i);
         if (of < objects.size()) kept.insert(kept.begin() + pos, copies, movedUp(objects[of], 30000.f));
     }
+    // Objects of its own, as the level string has them ("1,31,2,600,3,105": a startpos at 600,105), at the end.
+    for (auto const& v : update["add"]) {
+        if (auto s = v.asString(); s.isOk()) kept.push_back(s.unwrap());
+    }
     std::string joined = parts[0] + ";";
     for (auto const& o : kept) joined += o + ";";
     auto& t = g_smoke;
     t.realLevelString = level->m_levelString;
     t.realLevelVersion = level->m_levelVersion;
     t.updated = true;
+    // "keep": the level stays updated till the end of the test (entered again, it's still so).
+    t.keepUpdate = update["keep"].asBool().unwrapOr(false);
     level->m_levelString = ZipUtils::compressString(joined, false, 0);
     if (update["bump"].asBool().unwrapOr(true)) level->m_levelVersion += 1;
     log::info("Smoke test: update: {} objects -> {}, version {} -> {}", objects.size(), kept.size(), t.realLevelVersion,
@@ -1712,15 +1727,19 @@ void smokeDeleteUI(int stage, std::string picks, bool save) {
     }
 }
 
-// Once a frame till the mod hides the notification: when it came on screen and when it was hidden, by the clock.
+// Once a frame till the notification is off the screen, by the clock: when it came on (it fades in from there),
+// when the mod started hiding it (it fades out from there), and when it was gone (out of the overlay).
 void smokeNoticeClock() {
     auto& t = g_smoke;
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t.noticeStart)
         .count();
     if (t.noticeSeenMs < 0 && g_notice && g_notice->isShowing()) t.noticeSeenMs = ms;
-    if (g_noticeTimed && ms < 15000) return Loader::get()->queueInMainThread(smokeNoticeClock);
-    log::info("Smoke test: NOTICE at time scale {:.2f}: on screen after {} ms, hidden after {} ms (on screen for {} ms)",
-        t.noticeScale, t.noticeSeenMs, ms, t.noticeSeenMs < 0 ? -1 : ms - t.noticeSeenMs);
+    if (t.noticeHiddenMs < 0 && !g_noticeTimed) t.noticeHiddenMs = ms;
+    bool gone = t.noticeSeenMs < 0 ? !g_noticeTimed : (!g_notice || !g_notice->getParent());
+    if (!gone && ms < 20000) return Loader::get()->queueInMainThread(smokeNoticeClock);
+    log::info("Smoke test: NOTICE at time scale {:.2f}: on screen after {} ms, hiding after {} ms, gone after {} ms "
+        "(on screen for {} ms)", t.noticeScale, t.noticeSeenMs, t.noticeHiddenMs, ms,
+        t.noticeSeenMs < 0 ? -1 : ms - t.noticeSeenMs);
     CCDirector::get()->getScheduler()->setTimeScale(t.noticeWasScale);
     afterFrames(60, nextAction);
 }
@@ -1792,6 +1811,66 @@ void smokeSetting(std::string const& key, std::string const& value) {
         mod->setSettingValue<bool>(key, value == "true");
     }
     log::info("Smoke test: setting {} is {} now", key, value);
+}
+
+// An option of Eclipse Menu, set the way its menu sets it (the API's "internal" config is its options, and
+// setting one turns its hooks on or off), put back at the end. `type`: bool, int or double.
+void smokeEclipse(std::string const& type, std::string const& key, std::string const& value) {
+#ifdef SPC_ECLIPSE_API
+    namespace ec = eclipse::config;
+    if (!Loader::get()->getLoadedMod("eclipse.eclipse-menu")) return log::error("Smoke test: Eclipse is not loaded");
+    auto& restores = g_smoke.restores;
+    std::string was, now;
+    if (type == "bool") {
+        bool old = ec::getInternal<bool>(key, false);
+        restores.push_back([key, old] { ec::setInternal<bool>(key, old); });
+        ec::setInternal<bool>(key, value == "true");
+        was = old ? "true" : "false";
+        now = ec::getInternal<bool>(key, false) ? "true" : "false";
+    }
+    else if (type == "int") {
+        int old = ec::getInternal<int>(key, 0);
+        restores.push_back([key, old] { ec::setInternal<int>(key, old); });
+        ec::setInternal<int>(key, utils::numFromString<int>(value).unwrapOr(old));
+        was = fmt::to_string(old);
+        now = fmt::to_string(ec::getInternal<int>(key, 0));
+    }
+    else if (type == "double") {
+        double old = ec::getInternal<double>(key, 0.0);
+        restores.push_back([key, old] { ec::setInternal<double>(key, old); });
+        ec::setInternal<double>(key, utils::numFromString<double>(value).unwrapOr(old));
+        was = fmt::format("{:.4f}", old);
+        now = fmt::format("{:.4f}", ec::getInternal<double>(key, 0.0));
+    }
+    else return log::error("Smoke test: Eclipse option type {}: bool, int or double", type);
+    log::info("Smoke test: Eclipse {} is {} now (was {})", key, now, was);
+#else
+    log::error("Smoke test: Eclipse {} {}: built without Eclipse's API (build.bat smoke with Eclipse installed)", key, value);
+#endif
+}
+
+// Eclipse's StartPos Switcher as the player sees it: its "x/N" label (there only once the switcher took the
+// level's startposes, as the level made its objects), and where the next restart starts from.
+void logEclipseSwitcher(PlayLayer* pl, std::string_view when) {
+    auto node = CCScene::get()->getChildByIDRecursive("eclipse.eclipse-menu/startpos-switcher");
+    std::string label = "-";
+    if (node) {
+        if (auto l = typeinfo_cast<CCLabelBMFont*>(node->getChildByID("label"))) {
+            label = fmt::format("\"{}\"{}", l->getString() ? l->getString() : "", l->isVisible() ? "" : " (hidden)");
+        }
+    }
+    std::vector<std::string> startPoses;
+    for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+        if (auto spo = typeinfo_cast<StartPosObject*>(obj)) {
+            auto sp = spOf(spo);
+            startPoses.push_back(fmt::format("{:.0f}{}", spo->getPositionX(), sp ? fmt::format(" (SP {})", sp->id) : ""));
+        }
+    }
+    auto sp = spOf(pl->m_startPosObject);
+    log::info("Smoke test: ECLIPSE {}: switcher {}, label {}, startpos {}, test mode {}, startposes in the level [{}]", when,
+        node ? "there" : "not there", label,
+        sp ? fmt::format("of SP {}", sp->id) : (pl->m_startPosObject ? "of the level" : "none"), pl->m_isTestMode,
+        fmt::join(startPoses, ", "));
 }
 
 // A name typed into the rename popup of SP i, as from the keyboard, and saved.
@@ -2030,6 +2109,7 @@ void nextAction() {
         scheduler->setTimeScale(t.noticeScale);
         t.noticeStart = std::chrono::steady_clock::now();
         t.noticeSeenMs = -1;
+        t.noticeHiddenMs = -1;
         notify(NotificationIcon::Warning, Msg::TooEarly, autoPartSeconds());
         return smokeNoticeClock();
     }
@@ -2064,8 +2144,22 @@ void nextAction() {
         logSwitchers(rest);
         return next();
     }
+    // An Eclipse Menu option: "eclipse:bool:level.startpos_switcher:true", "eclipse:double:global.speedhack:0.3".
+    if (op == "eclipse") {
+        if (args.size() >= 3) smokeEclipse(args[0], args[1], args[2]);
+        else log::error("Smoke test: eclipse {}: type:key:value", rest);
+        return afterFrames(2, nextAction);
+    }
+    if (op == "eclipse_switcher") {
+        logEclipseSwitcher(pl, rest);
+        return next();
+    }
     if (op == "meddle") {
         t.meddle = rest == "on";
+        return next();
+    }
+    if (op == "log_restarts") {
+        t.logRestarts = rest == "on";
         return next();
     }
     if (op == "shot") {
@@ -2218,7 +2312,7 @@ void beforeStep(PlayLayer* pl) {
 
 void loaded(PlayLayer* pl, storage::Loaded const& loaded) {
     if (!g_smoke.active) return;
-    restoreSmokeUpdate();
+    if (!g_smoke.keepUpdate) restoreSmokeUpdate();
     if (loaded.movedOver) {
         log::info("Smoke test: SPs moved over to this version: {}, not: {} ({})", loaded.moved, loaded.notMoved.size(),
             text::percents(loaded.notMoved));
@@ -2258,7 +2352,7 @@ void ready(PlayLayer* pl) {
 
 void restarted(PlayLayer* pl) {
     if (g_smoke.active) g_smoke.refIndex = -1;  // the bot finds its place in the run again
-    if (g_smoke.externalOn) logRestart(pl, "restart");
+    if (g_smoke.externalOn || g_smoke.logRestarts) logRestart(pl, "restart");
     if (g_smoke.meddle && g_play.sp) {
         auto p = pl->m_player1;
         if (p->m_isShip) p->toggleFlyMode(false, true);
@@ -2274,9 +2368,9 @@ void restarted(PlayLayer* pl) {
     // What the player starts as from an SP, and the settings its startpos has (another mod may set them).
     if (auto sp = g_play.sp; sp && sp->object && sp->object->m_startSettings) {
         auto st = sp->object->m_startSettings;
-        log::info("Smoke test: SP {} restart: player {}, its startpos: mode {} speed {} mini {} flipped {} dual {} mirror {}",
-            sp->id, modeOf(pl), st->m_startMode, static_cast<int>(st->m_startSpeed), st->m_startMini, st->m_isFlipped,
-            st->m_startDual, st->m_mirrorMode);
+        log::info("Smoke test: SP {} restart: player {}, its startpos: mode {} speed {} mini {} flipped {} dual {} mirror {} "
+            "reset camera {}", sp->id, modeOf(pl), st->m_startMode, static_cast<int>(st->m_startSpeed), st->m_startMini,
+            st->m_isFlipped, st->m_startDual, st->m_mirrorMode, st->m_resetCamera);
     }
 }
 
@@ -2339,5 +2433,32 @@ class $modify(SPCMenuLayer, MenuLayer) {
         if (!MenuLayer::init()) return false;
         Loader::get()->queueInMainThread(startSmokeTest);
         return true;
+    }
+};
+
+// What the level has ready as it finishes making its objects (where Eclipse's switcher takes its startposes) and
+// as its setup completes (where the SPs' objects are added now): the anticheat spike's place in m_objects (the
+// SPs' objects have to come after it), the startpos the level picked, its length.
+void probeSetup(PlayLayer* pl, std::string_view when) {
+    if (!g_smoke.active) return;
+    auto spike = pl->m_anticheatSpike;
+    int index = spike ? static_cast<int>(pl->m_objects->indexOfObject(spike)) : -2;
+    log::info("Smoke test: SETUP {}: {} objects, anticheat spike {} (at {}), startpos {}, test mode {}, level length {:.1f}, "
+        "{} SPs loaded", when, pl->m_objects->count(), spike ? "there" : "none", index,
+        pl->m_startPosObject ? fmt::format("at {:.0f}", pl->m_startPosObject->getPositionX()) : "none", pl->m_isTestMode,
+        pl->m_levelLength, g_session.sps.size());
+}
+
+class $modify(SPCSmokeSetupProbe, PlayLayer) {
+    void createObjectsFromSetupFinished() {
+        probeSetup(this, "objects finished, before");
+        PlayLayer::createObjectsFromSetupFinished();
+        probeSetup(this, "objects finished, after");
+    }
+
+    void setupHasCompleted() {
+        probeSetup(this, "setup completed, before");
+        PlayLayer::setupHasCompleted();
+        probeSetup(this, "setup completed, after");
     }
 };

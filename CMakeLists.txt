@@ -18,6 +18,12 @@ add_library(${PROJECT_NAME} SHARED
 option(SPC_SMOKE "Build the smoke test in" OFF)
 if (SPC_SMOKE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE SPC_SMOKE)
+    # Eclipse Menu's API headers from the installed mod (its folder in geode/unzipped), for the tests with it.
+    if (SPC_ECLIPSE_API AND EXISTS "${SPC_ECLIPSE_API}/include/config.hpp")
+        target_include_directories(${PROJECT_NAME} PRIVATE "${SPC_ECLIPSE_API}")
+        target_compile_definitions(${PROJECT_NAME} PRIVATE SPC_ECLIPSE_API)
+        message(STATUS "Smoke test with Eclipse's API: ${SPC_ECLIPSE_API}")
+    endif()
 endif()
 
 if (NOT DEFINED ENV{GEODE_SDK})
