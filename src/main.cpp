@@ -145,7 +145,45 @@ constexpr float NOTICE_SECONDS = 1.5f;
 // switching quickly through SPs would show every SP passed on the way, one after another.
 Ref<Notification> g_notice;
 std::chrono::steady_clock::time_point g_noticeAt;
-unsigned int g_noticeFrame = 0;  // frame it was shown in
+// It goes by the clock, not by its own timer: that one runs in game time, which a speedhack slows down or
+// speeds up. Shown with no time of its own, it's hidden here NOTICE_SECONDS after it came on screen.
+std::chrono::steady_clock::time_point g_noticeHideAt;
+bool g_noticeSeen = false;   // came on screen (Geode shows notifications one at a time: it may wait its turn)
+bool g_noticeTimed = false;  // the clock check is queued
+constexpr auto NOTICE_TIME = std::chrono::milliseconds(static_cast<int>(NOTICE_SECONDS * 1000));
+constexpr auto NOTICE_STALE = std::chrono::seconds(5);  // still waiting its turn by then: not worth showing
+
+// Once a frame (queueInMainThread runs what's queued meanwhile in the next frame), till it's hidden.
+void hideNoticeOnTime() {
+    auto now = std::chrono::steady_clock::now();
+    if (!g_notice) {
+        g_noticeTimed = false;
+        return;
+    }
+    if (g_notice->isShowing()) {
+        if (!g_noticeSeen) g_noticeHideAt = now + NOTICE_TIME;
+        g_noticeSeen = true;
+        if (now >= g_noticeHideAt) {
+            g_noticeTimed = false;
+            return g_notice->hide();
+        }
+    }
+    else if (g_noticeSeen || now - g_noticeAt > NOTICE_STALE) {
+        // Gone (hidden, cancelled), or never came on.
+        if (!g_noticeSeen) g_notice->cancel();
+        g_noticeTimed = false;
+        return;
+    }
+    Loader::get()->queueInMainThread(hideNoticeOnTime);
+}
+
+void timeNotice(std::chrono::steady_clock::time_point now) {
+    g_noticeAt = now;
+    g_noticeHideAt = now + NOTICE_TIME;
+    if (g_noticeTimed) return;
+    g_noticeTimed = true;
+    Loader::get()->queueInMainThread(hideNoticeOnTime);
+}
 
 // Notification has its label in bigFont, which has no Cyrillic letters: text that needs the mod's font
 // goes into a label of the mod's beside it, with the notification's own one left empty.
@@ -185,22 +223,21 @@ void notify(std::string const& text, NotificationIcon icon = NotificationIcon::I
     log::info("Notice: {}", text);
     smoke::noticed(text);
     auto now = std::chrono::steady_clock::now();
-    // On screen and not fading out yet: change it in place, which also restarts its timer.
-    if (g_notice && g_notice->isShowing() && now - g_noticeAt < std::chrono::milliseconds(1200)) {
+    // On screen and not fading out yet: change it in place, its time starting over.
+    if (g_notice && g_notice->isShowing() && g_noticeTimed && g_noticeHideAt - now > NOTICE_TIME / 5) {
         setNoticeText(g_notice, text);
         g_notice->setIcon(icon);
-        // Not in the frame it was shown in: setTime stops its actions, and its fade-in starts a frame later.
-        if (CCDirector::get()->getTotalFrames() != g_noticeFrame) g_notice->setTime(NOTICE_SECONDS);
-        g_noticeAt = now;
+        timeNotice(now);
         return;
     }
     // Still waiting in the queue: drop it; fading out: let it go.
     if (g_notice) g_notice->cancel();
-    g_notice = Notification::create(text, icon, NOTICE_SECONDS);
+    // Time 0: no timer of its own (hideNoticeOnTime).
+    g_notice = Notification::create(text, icon, 0.f);
     setNoticeText(g_notice, text);
+    g_noticeSeen = false;
     g_notice->show();
-    g_noticeAt = now;
-    g_noticeFrame = CCDirector::get()->getTotalFrames();
+    timeNotice(now);
 }
 
 template <class... Args>

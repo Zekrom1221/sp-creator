@@ -47,6 +47,10 @@ struct SmokeTest {
     bool cleanup = false;      // delete the saved SPs at the end
     int compat = 0;            // phases with other mods' ways in (see smokeCompat)
     int takeoverAt = -1;       // auto part step to press at, ending the auto part
+    // notice_clock: a notification shown with the game's time running slower or faster (as with a speedhack).
+    std::chrono::steady_clock::time_point noticeStart;
+    long long noticeSeenMs = -1;  // when it came on screen
+    float noticeScale = 1.f, noticeWasScale = 1.f;
     bool ui = false;           // look at the mod's UI at the end (pictures in the mod save dir)
     bool uiDone = false;
     bool pausing = false;      // the smoke test opens the pause menu itself
@@ -1708,6 +1712,19 @@ void smokeDeleteUI(int stage, std::string picks, bool save) {
     }
 }
 
+// Once a frame till the mod hides the notification: when it came on screen and when it was hidden, by the clock.
+void smokeNoticeClock() {
+    auto& t = g_smoke;
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t.noticeStart)
+        .count();
+    if (t.noticeSeenMs < 0 && g_notice && g_notice->isShowing()) t.noticeSeenMs = ms;
+    if (g_noticeTimed && ms < 15000) return Loader::get()->queueInMainThread(smokeNoticeClock);
+    log::info("Smoke test: NOTICE at time scale {:.2f}: on screen after {} ms, hidden after {} ms (on screen for {} ms)",
+        t.noticeScale, t.noticeSeenMs, ms, t.noticeSeenMs < 0 ? -1 : ms - t.noticeSeenMs);
+    CCDirector::get()->getScheduler()->setTimeScale(t.noticeWasScale);
+    afterFrames(60, nextAction);
+}
+
 // The SP list keeps its scroll when it's rebuilt in place (a delete's confirmation, the delete): scrolled to the
 // end, the last SP deleted, then halfway, a confirmation. Each step logs where the list is scrolled.
 void smokeListScroll(int stage) {
@@ -1989,6 +2006,17 @@ void nextAction() {
         return smokeDeleteUI(0, args.empty() ? "all" : args[0], args.size() > 1 && args[1] == "save");
     }
     if (op == "list_scroll") return smokeListScroll(0);
+    // A notification with the game's time scaled (as a speedhack does): it stays NOTICE_SECONDS by the clock.
+    if (op == "notice_clock") {
+        auto scheduler = CCDirector::get()->getScheduler();
+        t.noticeWasScale = scheduler->getTimeScale();
+        t.noticeScale = utils::numFromString<float>(rest).unwrapOr(1.f);
+        scheduler->setTimeScale(t.noticeScale);
+        t.noticeStart = std::chrono::steady_clock::now();
+        t.noticeSeenMs = -1;
+        notify(NotificationIcon::Warning, Msg::TooEarly, autoPartSeconds());
+        return smokeNoticeClock();
+    }
     if (op == "rename") {
         auto nameAt = rest.find(':');
         return smokeRename(static_cast<size_t>(arg(0, 0)), nameAt == std::string::npos ? std::string() : rest.substr(nameAt + 1));
