@@ -112,6 +112,7 @@ struct Session {
     // New SPs get them first (addObjectFor).
     std::vector<Ref<StartPosObject>> retired;
     int objectsMade = 0;                           // through addObject
+    bool madeEarly = false;                        // the SPs' objects made as the level finished its own (madeEarly)
     StartPosObject* levelStartPos = nullptr;       // the startpos the level itself picked (owned by the level)
     bool levelTestMode = false;
     int nextId = 1;
@@ -329,16 +330,49 @@ void placeObjects() {
     }
 }
 
-// Adds the SP's startpos object to the level, where the player takes control. Going through addObject
-// lets other mods' addObject hooks (startpos switchers) collect it like the level's startposes.
+// A startpos object for an SP at `at`, added to the level through addObject: other mods' addObject hooks
+// (startpos switchers) collect it like the level's startposes. `keepIds`: the game's unique ID counter left
+// as it was (before the game adds its own objects after the level's).
+StartPosObject* addStartPos(PlayLayer* pl, CCPoint at, bool keepIds) {
+    // Made the way the level's own startposes are (object 31): StartPosObject::create() alone leaves its
+    // object ID at 0, which switchers skip.
+    auto made = keepIds ? storage::createKeepingIds(31) : GameObject::createWithKey(31);
+    auto obj = typeinfo_cast<StartPosObject*>(made);
+    if (!obj || !obj->m_startSettings) return nullptr;
+    // No enter effects ("Don't Enter"): they put an object at its start position, 0,0 for the SPs' (see
+    // placeObjects), every frame for the objects added on entering, till a restart from an SP.
+    obj->m_isDontEnter = true;
+    obj->m_ignoreEnter = true;
+    obj->setPosition(at);
+    auto startPos = pl->m_startPosObject;
+    bool testMode = pl->m_isTestMode;
+    pl->addObject(obj);
+    // The game takes an added startpos for the level's start when it's further on: keep the one it has.
+    if (pl->m_startPosObject != startPos) pl->setStartPosObject(startPos);
+    pl->m_isTestMode = testMode;
+    g_session.objectsMade++;
+    return obj;
+}
+
+// Out of the level, kept for an SP to come (addObjectFor): other mods' switchers may still have it.
+void setAside(PlayLayer* pl, Ref<StartPosObject> obj) {
+    pl->removeObjectFromSection(obj);
+    g_session.retired.push_back(obj);
+    pl->m_objects->removeObject(obj);
+}
+
+// Adds the SP's startpos object to the level, where the player takes control.
 // Switchers keep what they collected until the level is left, deleted SPs' objects too (MegaHack's list
 // grew by all the SPs ever imported): a deleted SP's object, if there's one, comes back instead, past
-// addObject, and their lists don't grow.
+// addObject, and their lists don't grow. The objects made for the SPs as the level finished making its
+// objects (madeEarly) are set aside the same way, each at its SP's x: the SP gets that one back.
 void addObjectFor(PlayLayer* pl, StartPoint& sp) {
     auto& retired = g_session.retired;
     if (!retired.empty()) {
-        Ref<StartPosObject> obj = retired.front();
-        retired.erase(retired.begin());
+        auto it = std::find_if(retired.begin(), retired.end(), [&](auto const& o) { return o->getPositionX() == sp.x; });
+        if (it == retired.end()) it = retired.begin();
+        Ref<StartPosObject> obj = *it;
+        retired.erase(it);
         obj->setPosition(objectPosition(sp));
         pl->m_objects->addObject(obj);
         pl->addToSection(obj);
@@ -346,35 +380,39 @@ void addObjectFor(PlayLayer* pl, StartPoint& sp) {
         sp.object = obj;
         return;
     }
-    // Made the way the level's own startposes are (object 31): StartPosObject::create() alone leaves its
-    // object ID at 0, which switchers skip.
-    auto obj = typeinfo_cast<StartPosObject*>(GameObject::createWithKey(31));
-    if (!obj || !obj->m_startSettings) {
+    auto obj = addStartPos(pl, objectPosition(sp), false);
+    if (!obj) {
         log::error("SP {}: no startpos object", sp.id);
         return;
     }
-    // No enter effects ("Don't Enter"): they put an object at its start position, 0,0 for the SPs' (see
-    // placeObjects), every frame for the objects added on entering, till a restart from an SP.
-    obj->m_isDontEnter = true;
-    obj->m_ignoreEnter = true;
-    obj->setPosition(objectPosition(sp));
-    auto startPos = pl->m_startPosObject;
-    bool testMode = pl->m_isTestMode;
-    pl->addObject(obj);
-    // The game takes an added startpos for the level's start when it's further on: keep the one it has.
-    if (pl->m_startPosObject != startPos) pl->setStartPosObject(startPos);
-    pl->m_isTestMode = testMode;
     storage::numberObject(pl, obj);
     sp.object = obj;
-    g_session.objectsMade++;
+}
+
+// As the level finishes making its objects, where other mods' switchers take its startposes (Eclipse's sorts them
+// there, and with none stays off for the level), objects for the SPs, at their x as the files have it. The SPs load
+// later (setupHasCompleted), once the game has added its anticheat spike after the level's objects: in m_objects
+// their objects come after it, which their checkpoints count on (it's referred to by its place). So these are set
+// aside at once, as deleted SPs' objects are, till the SPs load and take them back.
+void madeEarly(PlayLayer* pl) {
+    auto& s = g_session;
+    if (s.madeEarly) return;
+    s.madeEarly = true;
+    auto xs = storage::peekPositions(pl);
+    std::sort(xs.begin(), xs.end());
+    // Not hidden like the level's startposes: they're the SPs'.
+    bool hiding = std::exchange(s.hiding, false);
+    for (float x : xs) {
+        if (auto obj = addStartPos(pl, {x, 105.f}, true)) setAside(pl, obj);
+    }
+    s.hiding = hiding;
+    if (!xs.empty()) log::info("{} SP objects made as the level finished making its objects", xs.size());
 }
 
 // Takes a deleted SP's object out of the level.
 void retireObject(PlayLayer* pl, StartPoint& sp) {
     if (!sp.object) return;
-    pl->removeObjectFromSection(sp.object);
-    g_session.retired.push_back(sp.object);
-    pl->m_objects->removeObject(sp.object);
+    setAside(pl, sp.object);
     sp.object = nullptr;  // it may go to another SP
     // The SPs' objects after it moved up a place.
     for (auto const& other : g_session.sps) {
@@ -1073,6 +1111,21 @@ class $modify(SPCHandStartPoses, PlayLayer) {
     }
 };
 
+// The SPs' objects for other mods' switchers as the level finishes making its objects (madeEarly). Past every
+// other mod's hook, right after the game: when theirs go on after the game's, these are there.
+class $modify(SPCEarlyObjects, PlayLayer) {
+    static void onModify(auto& self) {
+        if (auto res = self.setHookPriority("PlayLayer::createObjectsFromSetupFinished", Priority::Replace); res.isErr()) {
+            log::error("Can't set the priority of the PlayLayer::createObjectsFromSetupFinished hook: {}", res.unwrapErr());
+        }
+    }
+
+    void createObjectsFromSetupFinished() {
+        PlayLayer::createObjectsFromSetupFinished();
+        madeEarly(this);
+    }
+};
+
 // Blitzkrieg looks for startposes in m_objects from the pause menu: the blanks are there for as long as it's
 // open. Not while playing: the game goes through m_objects itself, to restart (moving objects between their
 // sections, which the blanks aren't in), to make checkpoints, to quit. Out again before every other mod's hook
@@ -1168,7 +1221,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         g_session.sps = std::move(loaded.sps);
         g_session.nextId = loaded.nextId;
         // After the level's objects and its anticheat spike: theirs keep their places in m_objects (and so
-        // their unique IDs) whatever the SPs.
+        // their unique IDs) whatever the SPs. Each SP takes the object made for it early (madeEarly).
         for (auto const& sp : g_session.sps) addObjectFor(this, *sp);
         notifyLoaded(loaded, g_session.sps.size());
         smoke::ready(this);

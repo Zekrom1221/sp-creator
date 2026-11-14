@@ -1447,12 +1447,42 @@ void numberObject(PlayLayer* pl, GameObject* obj) {
     if (index >= 0) obj->m_uniqueID = FIRST_OBJECT_ID + index;
 }
 
-GameObject* blankFor(GameObject* startPos) {
-    // Made while the level makes its objects: their unique IDs go on from where they were.
+GameObject* createKeepingIds(int key) {
     auto counter = reinterpret_cast<int*>(geode::base::get() + UNIQUE_ID_COUNTER);
     int next = *counter;
-    auto blank = GameObject::createWithKey(1);
+    auto obj = GameObject::createWithKey(key);
     *counter = next;
+    return obj;
+}
+
+std::vector<float> peekPositions(PlayLayer* pl) {
+    std::vector<float> out;
+    auto plainKey = levelKey(pl);
+    if (plainKey.empty()) return out;
+    auto key = lowDetail(pl) ? plainKey + std::string(LOW_DETAIL_SUFFIX) : plainKey;
+    auto dir = Mod::get()->getSaveDir() / g_root / key;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+        if (!idFromName(it->path())) continue;
+        // The header is where it is whether the rest is compressed or not (see writeSP, compress).
+        char head[HEADER_SIZE] = {};
+        std::ifstream in(it->path(), std::ios::binary);
+        if (!in.read(head, sizeof(head))) continue;
+        bool plain = std::memcmp(head, MAGIC, sizeof(MAGIC)) == 0;
+        if (!plain && std::memcmp(head, COMPRESSED_MAGIC, sizeof(COMPRESSED_MAGIC)) != 0) continue;
+        int format = 0;
+        float x = NAN;
+        std::memcpy(&format, head + FORMAT_AT, sizeof(format));
+        std::memcpy(&x, head + X_AT, sizeof(x));
+        if (format == FORMAT_VERSION && std::isfinite(x)) out.push_back(x);
+    }
+    return out;
+}
+
+GameObject* blankFor(GameObject* startPos) {
+    // Made while the level makes its objects: their unique IDs go on from where they were.
+    auto blank = createKeepingIds(1);
     if (!blank) return nullptr;
     // A decoration, which nothing collides with or draws a hitbox for.
     blank->m_objectType = GameObjectType::Decoration;

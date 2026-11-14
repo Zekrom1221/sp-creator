@@ -49,6 +49,13 @@ namespace storage {
     void beforeCreatingObjects();
     // Once the level has created its objects.
     Loaded load(PlayLayer* pl);
+    // The x of each SP file in the level's folder, from the files' headers (nothing unpacked or checked further),
+    // for the SPs' objects to be made before load(), which waits for the game's anticheat spike. Files load()
+    // then sets aside (another level version) are in it too; SPs moved over from another version aren't.
+    std::vector<float> peekPositions(PlayLayer* pl);
+    // GameObject::createWithKey, without taking a unique ID from the game's counter: made while the level makes
+    // its objects, or before the game adds its own after them, an object of the mod's leaves theirs as they were.
+    GameObject* createKeepingIds(int key);
     // Gives an object the mod adds to the level after its own objects the unique ID of its place in
     // m_objects, like the level's objects have.
     void numberObject(PlayLayer* pl, GameObject* obj);
