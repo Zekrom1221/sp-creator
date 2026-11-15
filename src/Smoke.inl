@@ -2144,6 +2144,47 @@ void nextAction() {
         logSwitchers(rest);
         return next();
     }
+    // The SP list over the pause menu, and the popup on top closed.
+    if (op == "pause_list") {
+        if (auto pause = CCScene::get()->getChildByType<PauseLayer>(0)) splist::open(pause);
+        else log::error("Smoke test: no pause menu");
+        return afterFrames(30, nextAction);
+    }
+    if (op == "close_popup") {
+        closeTopPopup();
+        return afterFrames(20, nextAction);
+    }
+    // Where restarts go now, whether the game is paused, where the player and the camera are, the music.
+    if (op == "state") {
+        auto audio = FMODAudioEngine::sharedEngine();
+        bool musicPaused = false;
+        if (audio->m_backgroundMusicChannel) audio->m_backgroundMusicChannel->getPaused(&musicPaused);
+        log::info("Smoke test: STATE {}: paused {}, active {}, startpos {}, player {:.1f},{:.1f}, camera {:.1f},{:.1f}, "
+            "step {}, auto part {}, attempt {}, music {} ms, music paused {}", rest, pl->m_isPaused, activeLabel(),
+            spOf(pl->m_startPosObject) ? fmt::format("of SP {}", spOf(pl->m_startPosObject)->id)
+            : (pl->m_startPosObject ? "of the level" : "none"), pl->m_player1->getPositionX(), pl->m_player1->getPositionY(),
+            pl->m_gameState.m_cameraPosition.x, pl->m_gameState.m_cameraPosition.y, g_rec.step,
+            g_play.sp ? fmt::format("of SP {} at step {}", g_play.sp->id, g_play.step) : "none", pl->m_attempts,
+            audio->getMusicTimeMS(0), musicPaused);
+        return next();
+    }
+    // Frames on the pause menu, where steps (wait) don't come.
+    if (op == "frames") return afterFrames(std::max(1, arg(0, 30)), nextAction);
+    // The level's objects in the camera's view, and how many the game has shown (it shows and hides them as the
+    // camera goes).
+    if (op == "in_view") {
+        float from = pl->m_gameState.m_cameraPosition.x;
+        float to = from + CCDirector::get()->getWinSize().width;
+        int in = 0, shown = 0;
+        for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+            float x = obj->getPositionX();
+            if (x < from || x > to || obj->m_objectID == 31) continue;
+            in++;
+            if (obj->m_isActivated) shown++;
+        }
+        log::info("Smoke test: IN VIEW {}: camera {:.1f} to {:.1f}: {} objects, {} shown", rest, from, to, in, shown);
+        return next();
+    }
     // An Eclipse Menu option: "eclipse:bool:level.startpos_switcher:true", "eclipse:double:global.speedhack:0.3".
     if (op == "eclipse") {
         if (args.size() >= 3) smokeEclipse(args[0], args[1], args[2]);

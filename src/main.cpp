@@ -714,6 +714,17 @@ bool canUseKeys(PlayLayer* pl) {
     return pl && pl->m_player1 && !pl->m_isPaused && !pl->m_hasCompletedLevel && !pl->m_isPlatformer;
 }
 
+// On the pause menu itself, nothing open over it (the SP list, a rename, the settings: popups).
+bool canSwitchPaused(PlayLayer* pl) {
+    if (!pl || !pl->m_player1 || !pl->m_isPaused || pl->m_hasCompletedLevel || pl->m_isPlatformer) return false;
+    auto scene = CCScene::get();
+    if (!scene || !scene->getChildByType<PauseLayer>(0)) return false;
+    for (auto child : CCArrayExt<CCNode*>(scene->getChildren())) {
+        if (typeinfo_cast<FLAlertLayer*>(child)) return false;
+    }
+    return true;
+}
+
 bool placeSP() {
     auto pl = PlayLayer::get();
     if (!canUseKeys(pl) || pl->m_player1->m_isDead) return false;
@@ -777,11 +788,20 @@ void restartFrom(PlayLayer* pl, std::shared_ptr<StartPoint> sp) {
     pl->resetLevel();
 }
 
+// On the pause menu: the restart at once, behind the menu, the game still paused. The player stands at the
+// SP's spawn, and the game goes on from there however it goes on.
+void restartPaused(PlayLayer* pl, std::shared_ptr<StartPoint> sp) {
+    restartFrom(pl, std::move(sp));
+    // The restart took the blanks out (SPCBlanksOut): back in for as long as the menu is open.
+    storage::showBlanks(true);
+}
+
 // dir -1 / +1 through: level start, SPs by position.
-// False when the key isn't for the mod right now (paused, say), so it goes on to the game.
+// False when the key isn't for the mod right now (a popup over the pause menu, say), so it goes on to the game.
 bool switchSP(int dir) {
     auto pl = PlayLayer::get();
-    if (!canUseKeys(pl)) return false;
+    bool paused = canSwitchPaused(pl);
+    if (!paused && !canUseKeys(pl)) return false;
     auto& s = g_session;
     if (s.sps.empty()) {
         notify(NotificationIcon::Warning, Msg::NoSPs);
@@ -791,7 +811,8 @@ bool switchSP(int dir) {
     int i = (activeIndex() + 1 + dir + n + 1) % (n + 1) - 1;
     auto sp = i < 0 ? nullptr : s.sps[i];
     notify(labelOf(sp));
-    restartFrom(pl, sp);
+    if (paused) restartPaused(pl, sp);
+    else restartFrom(pl, sp);
     return true;
 }
 
