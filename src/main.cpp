@@ -16,6 +16,7 @@
 #include <cmath>
 #include <deque>
 #include <memory>
+#include <optional>
 
 using namespace geode::prelude;
 using text::Msg;
@@ -39,16 +40,22 @@ using text::Msg;
 
 namespace {
 
+// The game's own tick rate. SPs count time in its steps, 240ths of a second (the "steps" below), whatever rate
+// the game runs at: another (Physics Bypass in Eclipse or Mega Hack) makes each step shorter or longer, and the
+// mod records and replays by the time that goes by (stepUnit). At 240 a step is exactly one.
 constexpr int STEPS_PER_SECOND = 240;
 // Steps of the original run kept after placing an SP, to compare the handoff with it.
 constexpr int TAIL_STEPS = 60;
-// Physics steps between hidden checkpoints: the auto part comes out up to this much longer than set.
+// Steps between hidden checkpoints: the auto part comes out up to this much longer than set.
 // Fewer would take more work while playing.
 constexpr int CHECKPOINT_INTERVAL = 24;
+// Times in steps that are the same (sums of a step's time have rounding in them at other rates).
+constexpr double SAME_TIME = 1e-6;
 
-// A hidden checkpoint taken before `step` of the current attempt.
+// A hidden checkpoint taken before `step` of the current attempt, at `clock`.
 struct Snapshot {
     int step = 0;
+    double clock = 0;
     Ref<CheckpointObject> cp;
     Holds holds{};          // buttons held at that moment
     uint64_t inputSeq = 0;  // inputs from this one on came after the checkpoint
@@ -58,20 +65,27 @@ struct Snapshot {
 // The current attempt, as played.
 struct Recording {
     int step = 0;              // physics steps played in this attempt
+    double clock = 0;          // and the time they took, in steps (at 240 a second the same number)
     std::deque<Frame> frames;  // frames[i]: state before step firstStep + i
+    std::deque<double> times;  // times[i]: the clock then
     int firstStep = 0;
     std::deque<Input> inputs;
     uint64_t inputSeq = 0;
     std::deque<Snapshot> snapshots;
     Holds holds{};
     std::shared_ptr<StartPoint> tailFor;  // SP placed in this attempt that still collects its tail
+    double tailFrom = 0;                  // its handoff, by the clock
+    std::optional<Frame> tailLast;        // the frame recorded before, and its clock
+    double tailLastClock = 0;
     int hits = 0;
 };
 
 // The auto part of the attempt, if it started from an SP.
 struct Playback {
     std::shared_ptr<StartPoint> sp;
-    int step = 0;
+    int step = 0;          // physics steps played since the spawn
+    double cursor = 0;     // the time they took, in steps: where in the SP's frames the player is
+                           // (at 240 a second the same number)
     size_t nextInput = 0;
     bool controlling = false;  // the auto part owns the buttons until the handoff
     bool injecting = false;
@@ -129,6 +143,20 @@ struct Session {
 
 Session g_session;
 int g_sessionCount = 0;  // levels entered
+// The step being played: what the game passed to processCommands, and its time in steps.
+float g_stepDt = 0;
+bool g_stepHalf = false, g_stepLast = false;
+double g_stepUnit = 1;
+
+// A step's time in steps of 240 a second: the game passes 1/240 s, Physics Bypass 1/TPS. A time warp trigger
+// doesn't change it (the game makes more steps instead: Dash's 0.2 makes five times as many, each still 1/240),
+// nor does a speedhack (it changes how many steps come in a second). The game's own rate gives exactly 1 (dt is
+// a float: 1/240 is near it).
+double stepUnit(float dt) {
+    double unit = dt * STEPS_PER_SECOND;
+    if (!std::isfinite(unit) || unit <= 0 || std::abs(unit - 1) < 1e-3) return 1;
+    return unit;
+}
 Recording g_rec;
 Playback g_play;
 
@@ -318,6 +346,88 @@ void trackDiff(Frame const& now, std::vector<Frame> const& refs, size_t i, float
     x = std::max(x, bestX);
     y = std::max(y, bestY);
     cam = std::max(cam, bestCam);
+}
+
+// Between two frames, at the game's own rate one step apart, at another rate a fraction of one: the player's
+// numbers go evenly from one to the other.
+float lerp(float a, float b, double f) {
+    return static_cast<float>(a + (b - a) * f);
+}
+
+PlayerFrame between(PlayerFrame const& a, PlayerFrame const& b, double f) {
+    // The short way round: rotations may come as 350 then 10.
+    double turn = std::remainder(static_cast<double>(b.rot) - a.rot, 360.0);
+    return {lerp(a.y, b.y, f), a.yVel + (b.yVel - a.yVel) * f, static_cast<float>(a.rot + turn * f)};
+}
+
+// The state a fraction f of the way from a to b. Hits so far: a's.
+Frame between(Frame const& a, Frame const& b, double f) {
+    Frame r = a;
+    r.x = lerp(a.x, b.x, f);
+    r.p1 = between(a.p1, b.p1, f);
+    if (a.dual && b.dual) r.p2 = between(a.p2, b.p2, f);
+    r.camX = lerp(a.camX, b.camX, f);
+    r.camY = lerp(a.camY, b.camY, f);
+    return r;
+}
+
+// A frame with the position of the frame before. The game moves the player's m_position once a frame, not each
+// step (the speed is the step's own): in a frame of several steps the later ones show the first one's place. How
+// the auto part has always told them at the game's own rate: by x.
+template <class Frames>
+bool staleX(Frames const& frames, size_t i) {
+    return i > 0 && frames[i].x == frames[i - 1].x;
+}
+
+// The same, for going between frames: the whole position the frame before's. Not x alone: in rotated gameplay
+// the player goes along y with x standing still.
+template <class Frames>
+bool stale(Frames const& frames, size_t i) {
+    return i > 0 && frames[i].x == frames[i - 1].x && frames[i].p1.y == frames[i - 1].p1.y;
+}
+
+// From frame a to frame b the player's numbers don't go evenly when something happens on the way: a jump (a
+// teleport, the second player coming or going) or the speed changing at once (a pad, an orb, a portal, a ceiling;
+// gravity alone changes it a fraction of a unit a step). Then what's in between is left to the game's steps, which
+// do it as the run did: a ball pushed half way to an orb's speed would miss the orb.
+template <class Frames>
+bool happensBetween(Frames const& frames, size_t a, size_t b) {
+    constexpr float JUMP = 40.f;         // a step moves the player a few units
+    constexpr double SPEED_JUMP = 1.0;
+    auto const& fa = frames[a];
+    auto const& fb = frames[b];
+    if (fa.dual != fb.dual || std::abs(fb.x - fa.x) > JUMP || std::abs(fb.p1.y - fa.p1.y) > JUMP
+        || (fa.dual && std::abs(fb.p2.y - fa.p2.y) > JUMP)) {
+        return true;
+    }
+    for (size_t k = a; k < b; k++) {
+        auto const& f = frames[k];
+        auto const& g = frames[k + 1];
+        if (std::abs(g.p1.yVel - f.p1.yVel) > SPEED_JUMP) return true;
+        if (f.dual && g.dual && std::abs(g.p2.yVel - f.p2.yVel) > SPEED_JUMP) return true;
+    }
+    return false;
+}
+
+// The run's state at `at` (in steps) as an SP keeps it, from frames recorded at `times` at another tick rate,
+// starting the search at `i` (moved on as it goes: the times asked for only grow). A frame recorded right then:
+// that one, as it is (always so at the game's own rate). Otherwise between the last frame before and the first
+// after, stale ones left out. Where that can't be (nothing after it, something happening in between, an input
+// in between: `inputBy(a, b)`), a copy of `before`, the frame made before it: stale, so the auto part leaves the
+// player to the game there.
+// An input after frame a, by frame b: frame b has its doing in it already. The game moves the player for some
+// presses as they come (a spider's teleport, a ball's flip), before the step's frame is taken; in between the
+// player would have, say, a ball's lift without its flip, off the ground the press needs.
+template <class Frames, class Times, class InputBy>
+Frame frameAt(Frames const& frames, Times const& times, size_t& i, double at, Frame const& before, InputBy inputBy) {
+    while (i + 1 < frames.size() && times[i + 1] <= at + SAME_TIME) i++;
+    if (std::abs(times[i] - at) < SAME_TIME) return frames[i];
+    size_t a = i;
+    while (a > 0 && stale(frames, a)) a--;
+    size_t b = i + 1;
+    while (b < frames.size() && stale(frames, b)) b++;
+    if (b >= frames.size() || inputBy(a, b) || happensBetween(frames, a, b)) return before;
+    return between(frames[a], frames[b], (at - times[a]) / (times[b] - times[a]));
 }
 
 // m_currentCheckpoint is retained by the layer (startMusic retains the one it creates).
@@ -618,10 +728,28 @@ void undoOthersAtSpawn(PlayLayer* pl, StartPoint const& sp) {
     }
 }
 
-void playStep(PlayLayer* pl) {
+// The recorded state at c (in steps: another tick rate) to put the player in, as frameAt has it; `nextInput`: the
+// step of the next input the replay hasn't pressed yet. None where the game's steps take the player on: from the
+// last frame to the handoff, and where something happens between frames.
+std::optional<Frame> recordedAt(std::vector<Frame> const& frames, double c, int nextInput) {
+    size_t a = static_cast<size_t>(std::floor(c + SAME_TIME));
+    if (a >= frames.size()) return std::nullopt;
+    if (std::abs(c - static_cast<double>(a)) < SAME_TIME && !stale(frames, a)) return frames[a];
+    while (a > 0 && stale(frames, a)) a--;
+    size_t b = static_cast<size_t>(std::floor(c + SAME_TIME)) + 1;
+    while (b < frames.size() && stale(frames, b)) b++;
+    if (b >= frames.size() || nextInput <= static_cast<int>(b) || happensBetween(frames, a, b)) return std::nullopt;
+    return between(frames[a], frames[b], (c - static_cast<double>(a)) / static_cast<double>(b - a));
+}
+
+// `unit`: the step's time in steps (stepUnit). The auto part goes by time: at the game's own rate step k plays
+// frame k, at another the frames go by as fast as the time does.
+void playStep(PlayLayer* pl, double unit) {
     auto& pb = g_play;
     auto const& sp = *pb.sp;
     int k = pb.step++;
+    double c = pb.cursor;
+    pb.cursor += unit;
     if (k == 0) {
         undoOthersAtSpawn(pl, sp);
         // Loading the checkpoint puts the camera on its target instead of where it was (up to 15 units
@@ -631,27 +759,40 @@ void playStep(PlayLayer* pl) {
         gs.m_cameraPosition = gs.m_cameraLastPosition = CCPoint(f.camX, f.camY);
     }
     auto now = captureFrame(pl);
-    if (pb.controlling && k < sp.handoff()) {
-        auto const& f = sp.frames[k];
-        trackDiff(now, sp.frames, k, pb.autoX, pb.autoY, pb.autoCam);
+    int n = sp.handoff();
+    if (pb.controlling && c < n - SAME_TIME) {
+        int i = static_cast<int>(std::lround(c));
+        bool whole = std::abs(c - i) < SAME_TIME;
+        trackDiff(now, sp.frames, std::min(i, n - 1), pb.autoX, pb.autoY, pb.autoCam);
         if (k == 0) holdAgain(pl, sp);
         // Back on the recorded path every step, in case the replay drifts. Not to a frame recorded before the game
         // had moved the player on (its x is the frame before's; see trackDiff): that would put the player a step
-        // back, and the next frame a step on again, a jolt a wave shows.
-        if (k == 0 || sp.frames[k - 1].x != f.x) {
-            forcePlayer(pl->m_player1, f.p1);
-            if (f.dual && pl->m_player2) forcePlayer(pl->m_player2, f.p2);
+        // back, and the next frame a step on again, a jolt a wave shows. At another rate between frames
+        // (recordedAt), the inputs due at this step as pressed already: they go in right after.
+        std::optional<Frame> f;
+        if (unit == 1 && whole) {
+            if (!staleX(sp.frames, i)) f = sp.frames[i];
         }
-        while (pb.nextInput < sp.inputs.size() && sp.inputs[pb.nextInput].step <= k) {
+        else {
+            size_t next = pb.nextInput;
+            while (next < sp.inputs.size() && sp.inputs[next].step <= c + SAME_TIME) next++;
+            f = recordedAt(sp.frames, c, next < sp.inputs.size() ? sp.inputs[next].step : INT_MAX);
+        }
+        if (f) {
+            forcePlayer(pl->m_player1, f->p1);
+            if (f->dual && pl->m_player2) forcePlayer(pl->m_player2, f->p2);
+        }
+        // An input goes in before the first step at or past its time.
+        while (pb.nextInput < sp.inputs.size() && sp.inputs[pb.nextInput].step <= c + SAME_TIME) {
             auto const& in = sp.inputs[pb.nextInput++];
             inject(pl, holdIndex(in.button, in.p1), in.down);
         }
         return;
     }
     if (pb.controlling) endAutoPart(pl, false);
-    size_t t = k - sp.handoff();
-    if (t < sp.tail.size()) {
-        trackDiff(now, sp.tail, t, pb.tailX, pb.tailY, pb.tailCam);
+    long t = std::lround(c - n);
+    if (t >= 0 && static_cast<size_t>(t) < sp.tail.size()) {
+        trackDiff(now, sp.tail, static_cast<size_t>(t), pb.tailX, pb.tailY, pb.tailCam);
         return;
     }
     log::info("SP {}: {} steps after the handoff, largest difference from the original run: x {:.3f}, y {:.3f}, camera {:.3f}",
@@ -663,23 +804,41 @@ void takeSnapshot(PlayLayer* pl) {
     auto cp = pl->createCheckpoint();
     if (!cp) return;
     auto pressed = [](PlayerObject* p) { return p ? Pressed{p->m_jumpBuffered, p->m_stateRingJump} : Pressed{}; };
-    g_rec.snapshots.push_back({g_rec.step, cp, g_rec.holds, g_rec.inputSeq, {pressed(pl->m_player1), pressed(pl->m_player2)}});
+    g_rec.snapshots.push_back({g_rec.step, g_rec.clock, cp, g_rec.holds, g_rec.inputSeq,
+        {pressed(pl->m_player1), pressed(pl->m_player2)}});
+}
+
+// The run after an SP's handoff, a frame a step from it by the clock (each recorded frame at the game's own rate).
+void collectTail(Frame const& f) {
+    auto& r = g_rec;
+    auto& tail = r.tailFor->tail;
+    while (tail.size() < TAIL_STEPS) {
+        double at = r.tailFrom + static_cast<double>(tail.size());
+        if (at > r.clock + SAME_TIME) break;
+        if (std::abs(at - r.clock) < SAME_TIME || !r.tailLast) tail.push_back(f);
+        else tail.push_back(between(*r.tailLast, f, (at - r.tailLastClock) / (r.clock - r.tailLastClock)));
+    }
+    r.tailLast = f;
+    r.tailLastClock = r.clock;
+    if (tail.size() >= TAIL_STEPS) r.tailFor = nullptr;
 }
 
 // Before a step: record the state the step starts from, and keep only what an SP placed now could need.
 void recordStep(PlayLayer* pl) {
     auto& r = g_rec;
     auto f = captureFrame(pl);
-    if (r.tailFor) {
-        r.tailFor->tail.push_back(f);
-        if (r.tailFor->tail.size() >= TAIL_STEPS) r.tailFor = nullptr;
-    }
+    if (r.tailFor) collectTail(f);
     if (r.frames.empty()) r.firstStep = r.step;
     r.frames.push_back(f);
-    if (r.step % CHECKPOINT_INTERVAL == 0) takeSnapshot(pl);
-    size_t keep = static_cast<size_t>(std::ceil(autoPartSeconds() * STEPS_PER_SECOND)) + CHECKPOINT_INTERVAL + 2;
-    while (r.frames.size() > keep) {
+    r.times.push_back(r.clock);
+    // Every CHECKPOINT_INTERVAL steps of time: at the first step at or past each multiple of it (at the game's own
+    // rate the step numbers themselves).
+    if (std::fmod(r.clock + SAME_TIME, CHECKPOINT_INTERVAL) < g_stepUnit) takeSnapshot(pl);
+    // Frames spanning `keep` steps of time.
+    double keep = std::ceil(autoPartSeconds() * STEPS_PER_SECOND) + CHECKPOINT_INTERVAL + 2;
+    while (r.clock - r.times.front() > keep - 1 + SAME_TIME) {
         r.frames.pop_front();
+        r.times.pop_front();
         r.firstStep++;
     }
     while (!r.inputs.empty() && r.inputs.front().step < r.firstStep) r.inputs.pop_front();
@@ -733,11 +892,13 @@ bool placeSP() {
         return true;
     }
     auto& r = g_rec;
-    int now = r.step;  // the player is in control from this step on
+    // The player is in control from this step on, and from this time.
+    int now = r.step;
+    double nowClock = r.clock;
     int autoSteps = static_cast<int>(std::lround(autoPartSeconds() * STEPS_PER_SECOND));
     Snapshot const* snap = nullptr;
     for (auto it = r.snapshots.rbegin(); it != r.snapshots.rend(); ++it) {
-        if (it->step <= now - autoSteps && it->step >= r.firstStep) {
+        if (it->clock <= nowClock - autoSteps + SAME_TIME && it->step >= r.firstStep) {
             snap = &*it;
             break;
         }
@@ -751,13 +912,29 @@ bool placeSP() {
     sp->cp = snap->cp;
     sp->holds = snap->holds;
     sp->pressed = snap->pressed;
-    sp->spawnStep = snap->step;
-    for (int s = snap->step; s < now; s++) sp->frames.push_back(r.frames[s - r.firstStep]);
+    // An SP keeps its time in steps of 240 a second, whatever rate it was placed at: a frame a step from the spawn
+    // till the handoff (at the game's own rate the recorded frames themselves), inputs at the steps they go in
+    // before. The file is the same at any rate.
+    sp->spawnStep = static_cast<int>(std::lround(snap->clock));
+    int count = static_cast<int>(std::ceil(nowClock - snap->clock - SAME_TIME));
+    std::vector<size_t> inputFrames;  // the frames the inputs went in before
     for (auto const& in : r.inputs) {
         if (in.seq < snap->inputSeq || in.step >= now) continue;
         auto rel = in;
-        rel.step -= snap->step;
+        size_t frame = static_cast<size_t>(in.step - r.firstStep);
+        inputFrames.push_back(frame);
+        rel.step = std::min(count - 1, static_cast<int>(std::ceil(r.times[frame] - snap->clock - SAME_TIME)));
         sp->inputs.push_back(rel);
+    }
+    std::sort(inputFrames.begin(), inputFrames.end());
+    auto inputBy = [&](size_t a, size_t b) {
+        auto it = std::upper_bound(inputFrames.begin(), inputFrames.end(), a);
+        return it != inputFrames.end() && *it <= b;
+    };
+    size_t from = static_cast<size_t>(snap->step - r.firstStep);
+    for (int k = 0; k < count; k++) {
+        Frame const& before = k > 0 ? sp->frames.back() : r.frames[from];
+        sp->frames.push_back(frameAt(r.frames, r.times, from, snap->clock + k, before, inputBy));
     }
     sp->x = pl->m_player1->m_position.x;
     sp->percent = pl->getCurrentPercent();
@@ -768,10 +945,16 @@ bool placeSP() {
     addObjectFor(pl, *sp);
     choose(sp);
     r.tailFor = sp;
+    r.tailFrom = nowClock;
+    r.tailLast.reset();
     g_session.unsaved.push_back(sp);
     notify(NotificationIcon::Success, Msg::Placed, activeLabel());
     log::info("SP {} placed at x {:.1f} ({:.2f}%): spawn from step {}, auto part {} steps, {} inputs, practice {}",
         sp->id, sp->x, sp->percent, snap->step, sp->handoff(), sp->inputs.size(), pl->m_isPracticeMode);
+    if (std::abs((nowClock - snap->clock) - (now - snap->step)) > SAME_TIME) {
+        log::info("SP {}: placed at {:.1f} steps a second ({} steps of the run since the spawn), kept at 240", sp->id,
+            (now - snap->step) / (nowClock - snap->clock) * STEPS_PER_SECOND, now - snap->step);
+    }
     return true;
 }
 
@@ -1054,14 +1237,19 @@ class $modify(SPCBaseLayer, GJBaseGameLayer) {
             log::warn("Playing with the blanks of the level's startposes in m_objects: the startposes are back");
             storage::showBlanks(false);
         }
+        g_stepDt = dt;
+        g_stepHalf = isHalfTick;
+        g_stepLast = isLastTick;
+        g_stepUnit = stepUnit(dt);
         if (pl->m_player1 && !pl->m_isPlatformer) {
             // The smoke test plays like a player would: before the mod looks at the step.
             smoke::beforeStep(pl);
-            if (g_play.sp) playStep(pl);
+            if (g_play.sp) playStep(pl, g_stepUnit);
             recordStep(pl);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         g_rec.step++;
+        g_rec.clock += g_stepUnit;
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {

@@ -36,13 +36,15 @@ struct RefRow {
 };
 
 struct SmokeTest {
+    bool trace = false;        // "trace:on": every step of an auto part logged (TRACE)
     bool active = false;
     std::vector<float> placeAtX;
     size_t placed = 0;
     size_t tested = 0;         // SPs started from so far
     bool backAtStart = false;
     int base = 0;              // blind jumps: step of the first attempt that this attempt's step 0 matches
-    int stepsLeft = -1;        // in the current phase
+    // In the current phase: steps of time (a step at 240 a second, whatever rate the game runs at: stepUnit).
+    double stepsLeft = -1;
     std::vector<RefRow> reference;
     int refIndex = -1;         // row the player is at, -1 at the start of an attempt
     std::vector<std::pair<float, int>> firstRun;  // x and hits so far, per step of the first attempt
@@ -828,6 +830,16 @@ void finishSmokeTest() {
     log::info("Smoke test done");
     geode::utils::game::exit(false);
 }
+
+// "step_probe:<tag>": the next steps as the game passes them (dt, half tick, last tick of the frame), and how
+// many steps and how much level time go by in a second of the clock (probeStep).
+struct StepProbe {
+    std::string tag;
+    int left = 0;
+    int stepAt = 0;
+    double levelTimeAt = 0;
+    std::chrono::steady_clock::time_point at;
+} g_stepProbe;
 
 // What's on screen, overlays (notifications) included, as <mod save dir>/<name>.
 void captureScreen(std::string const& name) {
@@ -2168,6 +2180,15 @@ void nextAction() {
             audio->getMusicTimeMS(0), musicPaused);
         return next();
     }
+    if (op == "trace") {
+        g_smoke.trace = rest == "on";
+        return next();
+    }
+    if (op == "step_probe") {
+        g_stepProbe.tag = rest;
+        g_stepProbe.left = 1001;  // starts at the next step
+        return next();
+    }
     // Frames on the pause menu, where steps (wait) don't come.
     if (op == "frames") return afterFrames(std::max(1, arg(0, 30)), nextAction);
     // The level's objects in the camera's view, and how many the game has shown (it shows and hides them as the
@@ -2240,7 +2261,8 @@ void smokeStep(PlayLayer* pl) {
         // Blind jumps: held 30 steps of every 120, counted in the steps of the first attempt. Never pressed in
         // the auto part (with control not blocked a press would end it): held as a player would, so the handoff
         // gives the game what the first attempt held there.
-        int run = t.base + g_rec.step;
+        // By time, so the jumps come at the same moments at any tick rate.
+        int run = t.base + static_cast<int>(std::floor(g_rec.clock + SAME_TIME));
         bool hold = run % 120 < 30;
         if (g_play.sp && g_play.controlling) g_play.userHolds[1] = hold;
         else if (hold != g_rec.holds[1]) pl->handleButton(hold, 1, true);
@@ -2255,12 +2277,12 @@ void smokeStep(PlayLayer* pl) {
             }
         }
     }
-    if (g_play.sp && g_play.controlling && g_play.step == g_play.sp->handoff()) {
+    if (g_play.sp && g_play.controlling && g_play.cursor > g_play.sp->handoff() - SAME_TIME) {
         t.handoffX = pl->m_player1->m_position.x;
         t.handoffMode = modeOf(pl);
     }
     if (t.waitAuto >= 0) {
-        if (g_play.sp && g_play.controlling && g_play.step >= t.waitAuto) {
+        if (g_play.sp && g_play.controlling && g_play.cursor > t.waitAuto - SAME_TIME) {
             log::info("Smoke test: at step {} of the auto part of SP {}, x {:.1f}", g_play.step, g_play.sp->id, pl->m_player1->m_position.x);
             t.waitAuto = -1;
             Loader::get()->queueInMainThread(nextAction);
@@ -2277,7 +2299,7 @@ void smokeStep(PlayLayer* pl) {
         // Out of the step: the key may restart the level.
         Loader::get()->queueInMainThread([key] { pressKey(key); });
     }
-    if (t.takeoverAt >= 0 && g_play.sp && g_play.controlling && g_play.step == t.takeoverAt) {
+    if (t.takeoverAt >= 0 && g_play.sp && g_play.controlling && g_play.cursor > t.takeoverAt - SAME_TIME) {
         t.takeoverAt = -1;
         pl->handleButton(true, 1, true);
         log::info("Smoke test: pressed in the auto part: auto part {}, jump held {}", g_play.sp ? "goes on" : "ended",
@@ -2328,7 +2350,13 @@ void smokeStep(PlayLayer* pl) {
         }
         return;
     }
-    if (t.stepsLeft > 0 && --t.stepsLeft == 0) Loader::get()->queueInMainThread(t.scripted ? stepsDone : nextSmokePhase);
+    if (t.stepsLeft > 0) {
+        t.stepsLeft -= g_stepUnit;
+        if (t.stepsLeft < SAME_TIME) {
+            t.stepsLeft = 0;
+            Loader::get()->queueInMainThread(t.scripted ? stepsDone : nextSmokePhase);
+        }
+    }
 }
 
 }
@@ -2347,8 +2375,66 @@ void noticed(std::string const& text) {
     g_lastNotice = text;
 }
 
+void probeStep(PlayLayer* pl) {
+    auto& p = g_stepProbe;
+    if (p.left <= 0) return;
+    auto now = std::chrono::steady_clock::now();
+    if (p.left > 1000) {
+        p.left = 12;
+        p.stepAt = g_rec.step;
+        p.levelTimeAt = pl->m_gameState.m_levelTime;
+        p.at = now;
+    }
+    if (p.left > 1) {
+        log::info("Smoke test: STEP {}: step {}, dt {:.9f}, half {}, last {}, level time {:.6f}, time warp {:.3f}", p.tag,
+            g_rec.step, g_stepDt, g_stepHalf, g_stepLast, pl->m_gameState.m_levelTime, pl->m_gameState.m_timeWarp);
+        p.left--;
+        return;
+    }
+    double seconds = std::chrono::duration<double>(now - p.at).count();
+    if (seconds < 1.0) return;
+    log::info("Smoke test: STEP {}: {} steps and {:.4f} s of level time in {:.4f} s", p.tag, g_rec.step - p.stepAt,
+        pl->m_gameState.m_levelTime - p.levelTimeAt, seconds);
+    p.left = 0;
+}
+
 void beforeStep(PlayLayer* pl) {
-    if (g_smoke.active) smokeStep(pl);
+    if (g_smoke.active) {
+        // Every change of a step's time (stepUnit: another tick rate) or of the time warp.
+        static double lastUnit = 1;
+        static float lastWarp = 1;
+        float warp = pl->m_gameState.m_timeWarp;
+        if (std::abs(g_stepUnit - lastUnit) > 1e-4 || std::abs(warp - lastWarp) > 1e-4) {
+            log::info("Smoke test: STEP TIME at step {} (x {:.1f}): unit {:.6f}, dt {:.9f}, time warp {:.4f}", g_rec.step,
+                pl->m_player1->m_position.x, g_stepUnit, g_stepDt, warp);
+            lastUnit = g_stepUnit;
+            lastWarp = warp;
+        }
+        probeStep(pl);
+        // The state each step of an auto part starts from, and the inputs gone in so far.
+        if (g_smoke.trace && g_play.sp && g_play.controlling) {
+            auto p = pl->m_player1;
+            if (g_play.step == 0) {
+                std::string ins;
+                for (auto const& in : g_play.sp->inputs) ins += fmt::format(" {}{}@{}", in.down ? "D" : "U", in.button, in.step);
+                log::info("Smoke test: TRACE SP {} inputs:{}", g_play.sp->id, ins);
+                // The recorded frames around each input.
+                auto const& fr = g_play.sp->frames;
+                std::string around;
+                for (auto const& in : g_play.sp->inputs) {
+                    for (int k = std::max(0, in.step - 3); k <= in.step + 3 && k < static_cast<int>(fr.size()); k++) {
+                        around += fmt::format(" {}:{:.3f},{:.3f}", k, fr[k].x, fr[k].p1.y);
+                    }
+                    around += " |";
+                }
+                log::info("Smoke test: TRACE SP {} frames:{}", g_play.sp->id, around);
+            }
+            log::info("Smoke test: TRACE SP {} step {} at {:.3f}: x {:.3f}, y {:.3f}, yVel {:.4f}, rot {:.1f}, {}, on ground {}, "
+                "inputs in {}, holds {}", g_play.sp->id, g_play.step, g_play.cursor, p->m_position.x, p->m_position.y,
+                p->m_yVelocity, p->getRotation(), modeOf(pl), p->m_isOnGround, g_play.nextInput, g_play.gameHolds[1]);
+        }
+        smokeStep(pl);
+    }
 }
 
 void loaded(PlayLayer* pl, storage::Loaded const& loaded) {
