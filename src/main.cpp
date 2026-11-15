@@ -106,10 +106,22 @@ struct HiddenStartPos {
     bool handed = false;   // and it got there
 };
 
+// A startpos of the level in the mod's switcher.
+struct LevelStartPos {
+    StartPosObject* object;  // owned by the level
+    float x;
+    float percent;
+};
+
 // The open level's SPs (Storage.cpp keeps them between sessions).
 struct Session {
     std::vector<std::shared_ptr<StartPoint>> sps;  // sorted by x
     std::shared_ptr<StartPoint> active;            // null: the level's own start
+    // The level's own startposes are in the mod's switcher too, with the setting to hide them off (as it was on
+    // entering the level): as other mods' switchers have them, and the level start is then the real one (0%).
+    bool levelShown = false;
+    std::vector<LevelStartPos> levelStartPoses;    // sorted by x
+    StartPosObject* activeLevel = nullptr;         // when `active` is null: the startpos of the level restarts go to
     // `active` was picked by this mod (placing, switching, deleting) since the last restart, and wins at
     // the next one, unless another mod sets a startpos in between.
     // Another mod's switcher changes the startpos, and nulls m_currentCheckpoint (capeling's does): both are
@@ -560,16 +572,49 @@ void retireObject(PlayLayer* pl, StartPoint& sp) {
     }
 }
 
-// Restarts go to `sp` (null: the level's own start) from the next one on. `now`: the restart follows
-// right away.
-void choose(std::shared_ptr<StartPoint> sp, bool now = false) {
+// Where restarts go: an SP, a startpos of the level (in the switcher, see Session::levelShown), or neither: the
+// level start.
+struct Entry {
+    std::shared_ptr<StartPoint> sp;
+    StartPosObject* startPos = nullptr;
+    bool operator==(Entry const&) const = default;
+};
+
+Entry current() {
+    auto const& s = g_session;
+    return {s.active, s.active ? nullptr : s.activeLevel};
+}
+
+// `obj`, if it's a startpos of the level in the switcher.
+StartPosObject* levelStartPosOf(StartPosObject* obj) {
+    auto const& l = g_session.levelStartPoses;
+    return obj && std::any_of(l.begin(), l.end(), [&](auto const& p) { return p.object == obj; }) ? obj : nullptr;
+}
+
+// The level start: with the level's startposes in the switcher, the real one; without, the startpos the level
+// picked itself, if it has one (where the level starts without the mod).
+StartPosObject* levelStart() {
+    return g_session.levelShown ? nullptr : g_session.levelStartPos;
+}
+
+bool levelStartTestMode() {
+    return g_session.levelShown ? false : g_session.levelTestMode;
+}
+
+// Restarts go to `to` from the next one on. `now`: the restart follows right away.
+void choose(Entry to, bool now = false) {
     auto& s = g_session;
-    s.active = std::move(sp);
+    s.active = std::move(to.sp);
+    s.activeLevel = s.active ? nullptr : to.startPos;
     s.chosen = true;
     s.chosenNow = now;
     auto pl = PlayLayer::get();
     s.startPosWhenChosen = pl ? pl->m_startPosObject : nullptr;
     s.checkpointWhenChosen = pl ? pl->m_currentCheckpoint : nullptr;
+}
+
+void choose(std::shared_ptr<StartPoint> sp, bool now = false) {
+    choose(Entry{std::move(sp)}, now);
 }
 
 // Before resetLevel. Whoever set the startpos last decides where the attempt starts: this mod, or
@@ -578,7 +623,11 @@ void choose(std::shared_ptr<StartPoint> sp, bool now = false) {
 void applyActiveSP(PlayLayer* pl) {
     auto& s = g_session;
     bool foreign = pl->m_startPosObject != s.startPosWhenChosen || pl->m_currentCheckpoint != s.checkpointWhenChosen;
-    if (!s.chosen || (foreign && !s.chosenNow)) s.active = spOf(pl->m_startPosObject);
+    bool picked = s.chosen && (!foreign || s.chosenNow);
+    if (!picked) {
+        s.active = spOf(pl->m_startPosObject);
+        s.activeLevel = s.active ? nullptr : levelStartPosOf(pl->m_startPosObject);
+    }
     s.chosen = s.chosenNow = false;
     // A switcher that nulls m_currentCheckpoint without releasing it (capeling's) leaves the layer's retain on
     // the SP's checkpoint, which would then never be freed: give it back, if nobody did.
@@ -598,12 +647,26 @@ void applyActiveSP(PlayLayer* pl) {
         return;
     }
     s.active = nullptr;
+    if (picked && s.levelShown) {
+        // The mod picked a startpos of the level or the level start: there, as other mods' switchers go. The
+        // checkpoint the game made at the startpos it starts from (an SP's, set by the mod) would put the player
+        // back there: the game makes the new one's.
+        auto to = s.activeLevel;
+        if (pl->m_startPosObject != to || (s.lastCheckpoint && pl->m_currentCheckpoint == s.lastCheckpoint)) {
+            setCurrentCheckpoint(pl, nullptr);
+        }
+        pl->setStartPosObject(to);
+        pl->m_isTestMode = to != nullptr;
+        s.ownTestMode = false;
+        s.lastCheckpoint = nullptr;
+        return;
+    }
     // Off the SPs (also when a switcher picks a deleted SP's object): the level's own start.
     bool retired = isRetired(pl->m_startPosObject);
-    if (spOf(pl->m_startPosObject) || retired) pl->setStartPosObject(s.levelStartPos);
+    if (spOf(pl->m_startPosObject) || retired) pl->setStartPosObject(levelStart());
     // Test mode was on for the SP (or the switcher that picked the deleted SP turned it on).
     if (s.ownTestMode || retired) {
-        if (pl->m_startPosObject == s.levelStartPos) pl->m_isTestMode = s.levelTestMode;
+        if (pl->m_startPosObject == levelStart()) pl->m_isTestMode = levelStartTestMode();
         else if (!pl->m_startPosObject) pl->m_isTestMode = false;
     }
     s.ownTestMode = false;
@@ -852,10 +915,6 @@ int indexOf(std::shared_ptr<StartPoint> const& sp) {
     return it == sps.end() ? -1 : static_cast<int>(it - sps.begin());
 }
 
-int activeIndex() {
-    return indexOf(g_session.active);
-}
-
 // "SP 2/5 (4.8%)": SP ids skip numbers once SPs get deleted, so players see positions.
 std::string labelOf(std::shared_ptr<StartPoint> const& sp) {
     int i = indexOf(sp);
@@ -865,8 +924,31 @@ std::string labelOf(std::shared_ptr<StartPoint> const& sp) {
     return text::format(Msg::SPLabelNamed, sp->name, i + 1, n, sp->percent);
 }
 
+// "Level startpos (45.0%)": no number, so an SP's stays the one the SP list has.
+std::string labelOf(Entry const& e) {
+    if (e.sp || !e.startPos) return labelOf(e.sp);
+    for (auto const& p : g_session.levelStartPoses) {
+        if (p.object == e.startPos) return text::format(Msg::LevelStartPosLabel, p.percent);
+    }
+    return labelOf(nullptr);
+}
+
 std::string activeLabel() {
-    return labelOf(g_session.active);
+    return labelOf(current());
+}
+
+// What the switcher goes through: the level start, then the SPs and the level's startposes in the switcher by x, as
+// other mods' switchers have them (Eclipse's, MegaHack's: the startposes by x, the level's first at the same x).
+std::vector<Entry> entries() {
+    auto const& s = g_session;
+    std::vector<Entry> out{Entry{}};
+    auto level = s.levelStartPoses.begin();
+    for (auto const& sp : s.sps) {
+        for (; level != s.levelStartPoses.end() && level->x <= sp->x; ++level) out.push_back({nullptr, level->object});
+        out.push_back({sp});
+    }
+    for (; level != s.levelStartPoses.end(); ++level) out.push_back({nullptr, level->object});
+    return out;
 }
 
 bool canUseKeys(PlayLayer* pl) {
@@ -963,49 +1045,55 @@ void saveUnsaved() {
     g_session.unsaved.clear();
 }
 
-// Restart from `sp` (null: the level start), as startpos switchers do.
-void restartFrom(PlayLayer* pl, std::shared_ptr<StartPoint> sp) {
+// Restart from `to`, as startpos switchers do.
+void restartFrom(PlayLayer* pl, Entry to) {
     // Practice checkpoints would win over the startpos in resetLevel.
     if (pl->m_isPracticeMode) pl->removeAllCheckpoints();
-    choose(std::move(sp), true);
+    choose(std::move(to), true);
     pl->resetLevel();
 }
 
 // On the pause menu: the restart at once, behind the menu, the game still paused. The player stands at the
-// SP's spawn, and the game goes on from there however it goes on.
-void restartPaused(PlayLayer* pl, std::shared_ptr<StartPoint> sp) {
-    restartFrom(pl, std::move(sp));
+// spawn, and the game goes on from there however it goes on.
+void restartPaused(PlayLayer* pl, Entry to) {
+    restartFrom(pl, std::move(to));
     // The restart took the blanks out (SPCBlanksOut): back in for as long as the menu is open.
     storage::showBlanks(true);
 }
 
-// dir -1 / +1 through: level start, SPs by position.
+// dir -1 / +1 through entries(): the level start, the SPs (and the level's startposes) by position.
 // False when the key isn't for the mod right now (a popup over the pause menu, say), so it goes on to the game.
 bool switchSP(int dir) {
     auto pl = PlayLayer::get();
     bool paused = canSwitchPaused(pl);
     if (!paused && !canUseKeys(pl)) return false;
-    auto& s = g_session;
-    if (s.sps.empty()) {
+    auto list = entries();
+    if (list.size() < 2) {
         notify(NotificationIcon::Warning, Msg::NoSPs);
         return true;
     }
-    int n = static_cast<int>(s.sps.size());
-    int i = (activeIndex() + 1 + dir + n + 1) % (n + 1) - 1;
-    auto sp = i < 0 ? nullptr : s.sps[i];
-    notify(labelOf(sp));
-    if (paused) restartPaused(pl, sp);
-    else restartFrom(pl, sp);
+    int n = static_cast<int>(list.size());
+    auto at = std::find(list.begin(), list.end(), current());
+    int i = at == list.end() ? 0 : static_cast<int>(at - list.begin());
+    auto to = list[(i + dir + n) % n];
+    notify(labelOf(to));
+    if (paused) restartPaused(pl, to);
+    else restartFrom(pl, to);
     return true;
 }
 
-// Takes an SP out of the level, its file left as it is; restarts that went to it go to the one before it
-// (or the level start). `sp` by value: the caller's may be an element of the list it's erased from.
+// Takes an SP out of the level, its file left as it is; restarts that went to it go to what's before it in the
+// switcher (the SP before it, a startpos of the level, the level start). `sp` by value: the caller's may be an
+// element of the list it's erased from.
 void dropSP(PlayLayer* pl, std::shared_ptr<StartPoint> sp) {
     auto& s = g_session;
     int i = indexOf(sp);
     if (i < 0) return;
-    if (s.active == sp) choose(i > 0 ? s.sps[i - 1] : nullptr);
+    if (s.active == sp) {
+        auto list = entries();
+        auto at = std::find(list.begin(), list.end(), Entry{sp});
+        choose(at != list.end() && at != list.begin() ? *(at - 1) : Entry{});
+    }
     s.sps.erase(s.sps.begin() + i);
     retireObject(pl, *sp);
     if (g_rec.tailFor == sp) g_rec.tailFor = nullptr;
@@ -1028,12 +1116,12 @@ bool deleteSP() {
     if (!canUseKeys(pl)) return false;
     auto sp = g_session.active;
     if (!sp) {
-        notify(NotificationIcon::Warning, Msg::NoSPSelected);
+        notify(NotificationIcon::Warning, g_session.activeLevel ? Msg::NotAnSP : Msg::NoSPSelected);
         return true;
     }
     removeSP(pl, sp);
     notify(NotificationIcon::Success, Msg::Deleted, sp->percent);
-    restartFrom(pl, g_session.active);
+    restartFrom(pl, current());
     return true;
 }
 
@@ -1043,6 +1131,26 @@ bool switcherOn() {
 
 bool hideLevelStartPoses() {
     return Mod::get()->getSettingValue<bool>("hide-level-startposes");
+}
+
+// The level's startposes for the switcher (Session::levelShown): what other mods' switchers collect, every object 31
+// (the disabled ones too), as the level made them, before the SPs' objects come in.
+void collectLevelStartPoses(PlayLayer* pl) {
+    auto& s = g_session;
+    for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+        if (obj->m_objectID != 31) continue;
+        auto startPos = typeinfo_cast<StartPosObject*>(obj);
+        if (!startPos || spOf(startPos) || isRetired(startPos)) continue;
+        float x = startPos->getPositionX();
+        s.levelStartPoses.push_back({startPos, x, startPosPercent(pl, x)});
+    }
+    std::stable_sort(s.levelStartPoses.begin(), s.levelStartPoses.end(), [](auto const& a, auto const& b) { return a.x < b.x; });
+    // Where the level starts: the switcher goes on from there.
+    s.activeLevel = levelStartPosOf(pl->m_startPosObject);
+    if (!s.levelStartPoses.empty()) {
+        log::info("{} startposes of the level in the switcher, the level starts at {}", s.levelStartPoses.size(),
+            s.activeLevel ? fmt::format("x {:.1f}", s.activeLevel->getPositionX()) : std::string("0%"));
+    }
 }
 
 // After load(): `loaded.sps` may be moved out already, so the count comes apart.
@@ -1082,6 +1190,10 @@ std::vector<SP> const& sps() {
 
 SP const& active() {
     return g_session.active;
+}
+
+bool onLevelStartPos() {
+    return !g_session.active && g_session.activeLevel;
 }
 
 std::string label(SP const& sp) {
@@ -1446,10 +1558,12 @@ class $modify(SPCPlayLayer, PlayLayer) {
     void setupHasCompleted() {
         // The level has created its objects and picked its own startpos, if it has one. The SPs' objects,
         // added from here on, aren't hidden.
+        g_session.levelShown = !g_session.hiding;
         g_session.hiding = false;
         g_session.levelStartPos = m_startPosObject;
         g_session.levelTestMode = m_isTestMode;
         PlayLayer::setupHasCompleted();
+        if (g_session.levelShown) collectLevelStartPoses(this);
         auto loaded = storage::load(this);
         // After load(), which takes the objects' prints.
         std::vector<std::pair<GameObject*, GameObject*>> blanks;

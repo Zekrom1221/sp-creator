@@ -772,7 +772,8 @@ protected:
     CCNode* row(core::SP const& sp, int number) {
         auto node = CCNode::create();
         node->setContentSize({LIST_WIDTH, ROW_HEIGHT});
-        bool active = core::active() == sp;
+        // From a startpos of the level (not in the list), none.
+        bool active = core::active() == sp && (sp || !core::onLevelStartPos());
         bool confirming = sp && m_confirming == sp;
 
         std::string shown;

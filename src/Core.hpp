@@ -15,6 +15,8 @@ namespace core {
     std::vector<SP> const& sps();
     // The SP restarts go to, null for the level start.
     SP const& active();
+    // Restarts go to a startpos of the level (the setting to hide them off), not an SP or the level start.
+    bool onLevelStartPos();
     // "SP 2/5 (4.8%)", or with its name; "Level start" for null.
     std::string label(SP const& sp);
     // Restarts go to `sp` (null: the level start) from now on.

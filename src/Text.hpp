@@ -20,6 +20,8 @@ namespace text {
         LevelStart,
         SPLabel,          // {position} {count} {percent}
         SPLabelNamed,     // {name} {position} {count} {percent}
+        LevelStartPosLabel, // {percent}
+        NotAnSP,
         Loaded,           // {count}
         Failed,           // {count}
         LevelChanged,

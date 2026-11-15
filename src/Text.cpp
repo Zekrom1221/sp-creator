@@ -25,6 +25,8 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"Level start", "Старт уровня"},
     {"SP {}/{} ({:.1f}%)", "SP {}/{} ({:.1f}%)"},
     {"{} (SP {}/{}, {:.1f}%)", "{} (SP {}/{}, {:.1f}%)"},
+    {"Level startpos ({:.1f}%)", "Стартпос уровня ({:.1f}%)"},
+    {"This is the level's startpos: only SPs can be deleted", "Это стартпос уровня: удалить можно только SP"},
     {"SPs loaded: {}", "Загружено SP: {}"},
     {"SPs that couldn't be loaded: {}", "Не загрузилось SP: {}"},
     {"This level changed since you placed your SPs: they weren't loaded",

@@ -2180,6 +2180,41 @@ void nextAction() {
             audio->getMusicTimeMS(0), musicPaused);
         return next();
     }
+    // The mod's switcher: what it goes through (* where restarts go now), the startpos the game has, test mode, whose
+    // checkpoint the game has, the last notification.
+    if (op == "switcher") {
+        auto now = current();
+        std::vector<std::string> items;
+        for (auto const& e : entries()) {
+            float x = e.sp ? e.sp->x : e.startPos ? e.startPos->getPositionX() : 0.f;
+            bool disabled = e.startPos && e.startPos->m_startSettings && e.startPos->m_startSettings->m_disableStartPos;
+            items.push_back(fmt::format("{}{} x {:.0f}{}", e == now ? "*" : "", labelOf(e), x, disabled ? " disabled" : ""));
+        }
+        auto startPos = pl->m_startPosObject;
+        auto sp = spOf(startPos);
+        auto cp = pl->m_currentCheckpoint;
+        log::info("Smoke test: SWITCHER {}: [{}], startpos {}, test mode {}, checkpoint {}, practice {} ({} checkpoints), "
+            "player x {:.1f}, auto part {}, SP list row {}, notice \"{}\"", rest, fmt::join(items, "; "),
+            sp ? fmt::format("of SP {}", sp->id)
+               : startPos ? fmt::format("of the level at x {:.0f}", startPos->getPositionX()) : std::string("none"),
+            pl->m_isTestMode, !cp ? "none" : (g_session.active && cp == g_session.active->cp) ? "the SP's" : "the game's",
+            pl->m_isPracticeMode, pl->m_checkpointArray->count(), pl->m_player1->getPositionX(),
+            g_play.sp ? fmt::format("of SP {}", g_play.sp->id) : "none",
+            core::onLevelStartPos() ? "none" : g_session.active ? fmt::format("SP {}", g_session.active->id) : "level start",
+            g_lastNotice);
+        return next();
+    }
+    // A startpos of the level in the switcher (by x) disabled, as its Disable checkbox does.
+    if (op == "disable_startpos") {
+        size_t i = static_cast<size_t>(arg(0, 0));
+        auto const& level = g_session.levelStartPoses;
+        if (i < level.size() && level[i].object->m_startSettings) {
+            level[i].object->m_startSettings->m_disableStartPos = true;
+            log::info("Smoke test: the level's startpos at x {:.0f} disabled", level[i].x);
+        }
+        else log::error("Smoke test: no startpos {} of the level", i);
+        return next();
+    }
     if (op == "trace") {
         g_smoke.trace = rest == "on";
         return next();
