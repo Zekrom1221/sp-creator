@@ -15,6 +15,7 @@ namespace smoke {
 
 bool takesOver();     // a press ends the auto part whatever the setting says
 bool keepsPlaying();  // the game doesn't pause when its window goes to the background
+bool takesSnapshots();  // the mod's hidden checkpoints (a test turns them off to see what they do to a level)
 void noticed(std::string const& text);
 void beforeStep(PlayLayer* pl);                               // plays like a player would
 void loaded(PlayLayer* pl, storage::Loaded const& loaded);   // right after the level's SPs are read
@@ -28,6 +29,7 @@ void quitting();
 
 inline bool takesOver() { return false; }
 inline bool keepsPlaying() { return false; }
+inline bool takesSnapshots() { return true; }
 inline void noticed(std::string const&) {}
 inline void beforeStep(PlayLayer*) {}
 inline void loaded(PlayLayer*, storage::Loaded const&) {}

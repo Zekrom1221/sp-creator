@@ -989,6 +989,7 @@ void playStep(PlayLayer* pl, double unit) {
 }
 
 void takeSnapshot(PlayLayer* pl) {
+    if (!smoke::takesSnapshots()) return;
     auto cp = pl->createCheckpoint();
     if (!cp) return;
     auto pressed = [](PlayerObject* p) { return p ? Pressed{p->m_jumpBuffered, p->m_stateRingJump} : Pressed{}; };

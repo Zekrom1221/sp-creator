@@ -7,6 +7,7 @@
 // when one is given, and jumps blindly every half second otherwise.
 
 #include <Geode/modify/AppDelegate.hpp>
+#include <Geode/modify/GJEffectManager.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
 #include <Geode/cocos/support/zip_support/ZipUtils.h>
@@ -24,6 +25,8 @@
 #include <fstream>
 #include <set>
 
+void dumpCommands(PlayLayer* pl, std::string_view tag, int group);
+
 namespace {
 
 bool g_smokeTakeover = false;  // a press ends the auto part whatever the setting says
@@ -37,6 +40,11 @@ struct RefRow {
 
 struct SmokeTest {
     bool trace = false;        // "trace:on": every step of an auto part logged (TRACE)
+    bool speedLog = false;     // "speed_log:on": every change of player 1's speed logged (SPEED)
+    int autoPartPresses = 0;   // presses that came in while the auto part had the buttons (another mod's clicker)
+    bool snapshots = true;     // "snapshots:off": the mod makes no hidden checkpoints (no SPs can be placed then)
+    float watchX = NAN;        // "watch:<x>": the speed portals placed at this x, where they are, every few steps
+    float checkpointAtX = NAN; // "checkpoint_at:<x>": a practice checkpoint of the game's own once the player is there
     bool active = false;
     std::vector<float> placeAtX;
     size_t placed = 0;
@@ -1634,9 +1642,9 @@ void logPlay(PlayLayer* pl) {
     float x = pl->m_player1->m_position.x;
     bool handed = !std::isnan(t.handoffX);
     log::info("Smoke test: PLAY SP {} \"{}\" x {:.1f}: auto part {} steps, handed over at x {}, as {} (first pass {}); x {:.1f} to "
-        "{:.1f}: {} hits, first pass {}", sp->id, sp->name, sp->x, sp->handoff(), handed ? fmt::format("{:.1f}", t.handoffX) : "-",
-        handed ? t.handoffMode : "-", handed ? firstModeAt(t.handoffX) : "-", t.phaseStartX, x, g_rec.hits,
-        firstRunHits(t.phaseStartX, x));
+        "{:.1f}: {} hits, first pass {}; presses in the auto part {}", sp->id, sp->name, sp->x, sp->handoff(),
+        handed ? fmt::format("{:.1f}", t.handoffX) : "-", handed ? t.handoffMode : "-", handed ? firstModeAt(t.handoffX) : "-",
+        t.phaseStartX, x, g_rec.hits, firstRunHits(t.phaseStartX, x), t.autoPartPresses);
 }
 
 // The time an attempt or a wait took is up.
@@ -2244,6 +2252,89 @@ void nextAction() {
         g_smoke.trace = rest == "on";
         return next();
     }
+    if (op == "speed_log") {
+        g_smoke.speedLog = rest == "on";
+        return next();
+    }
+    if (op == "practice") {
+        pl->togglePracticeMode(rest != "off");
+        log::info("Smoke test: practice {}", pl->m_isPracticeMode);
+        return next();
+    }
+    if (op == "checkpoint_at") {
+        t.checkpointAtX = utils::numFromString<float>(rest).unwrapOr(NAN);
+        return next();
+    }
+    if (op == "commands") {
+        dumpCommands(pl, rest, arg(0, 2));
+        return next();
+    }
+    if (op == "snapshots") {
+        t.snapshots = rest != "off";
+        log::info("Smoke test: the mod's hidden checkpoints {}", t.snapshots ? "on" : "off");
+        return next();
+    }
+    if (op == "watch") {
+        g_smoke.watchX = rest == "off" ? NAN : utils::numFromString<float>(rest).unwrapOr(NAN);
+        return next();
+    }
+    // The level's objects of the given IDs between two x ("objects:200,201,202,203,1334:0:3000"): where, groups,
+    // hidden or not; startposes with their settings; the level's own start settings.
+    if (op == "objects") {
+        std::set<int> ids;
+        for (auto const& id : utils::string::split(args.size() > 0 ? args[0] : std::string(), ",")) {
+            ids.insert(utils::numFromString<int>(id).unwrapOr(-1));
+        }
+        float from = args.size() > 1 ? utils::numFromString<float>(args[1]).unwrapOr(0.f) : 0.f;
+        float to = args.size() > 2 ? utils::numFromString<float>(args[2]).unwrapOr(1e9f) : 1e9f;
+        if (auto s = pl->m_levelSettings) {
+            log::info("Smoke test: OBJECTS: the level starts as mode {} speed {} mini {} dual {} flipped {}", s->m_startMode,
+                static_cast<int>(s->m_startSpeed), s->m_startMini, s->m_startDual, s->m_isFlipped);
+        }
+        int count = 0;
+        for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+            float x = obj->getPositionX();
+            if (!ids.contains(obj->m_objectID) || x < from || x > to) continue;
+            count++;
+            std::vector<int> groups;
+            for (short i = 0; obj->m_groups && i < obj->m_groupCount; i++) groups.push_back((*obj->m_groups)[i]);
+            std::string extra;
+            if (auto sp = typeinfo_cast<StartPosObject*>(obj); sp && sp->m_startSettings) {
+                auto s = sp->m_startSettings;
+                extra = fmt::format(", startpos: mode {} speed {} mini {} dual {} flipped {} disabled {}{}", s->m_startMode,
+                    static_cast<int>(s->m_startSpeed), s->m_startMini, s->m_startDual, s->m_isFlipped, s->m_disableStartPos,
+                    spOf(sp) ? fmt::format(", of SP {}", spOf(sp)->id) : std::string());
+            }
+            log::info("Smoke test: OBJECT {} at {:.1f},{:.1f}: groups [{}], disabled {}, hidden {}, activated {}{}", obj->m_objectID,
+                x, obj->getPositionY(), fmt::join(groups, " "), obj->m_isDisabled, obj->m_isHide, obj->m_isActivated, extra);
+        }
+        log::info("Smoke test: OBJECTS {}: {} found", rest, count);
+        return next();
+    }
+    // The triggers between two x that aim at the given groups ("triggers:1,2,242:0:2000").
+    if (op == "triggers") {
+        std::set<int> groups;
+        for (auto const& g : utils::string::split(args.size() > 0 ? args[0] : std::string(), ",")) {
+            groups.insert(utils::numFromString<int>(g).unwrapOr(-1));
+        }
+        float from = args.size() > 1 ? utils::numFromString<float>(args[1]).unwrapOr(0.f) : 0.f;
+        float to = args.size() > 2 ? utils::numFromString<float>(args[2]).unwrapOr(1e9f) : 1e9f;
+        int count = 0;
+        for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+            auto fx = typeinfo_cast<EffectGameObject*>(obj);
+            float x = obj->getPositionX();
+            if (!fx || x < from || x > to) continue;
+            if (!groups.contains(fx->m_targetGroupID) && !groups.contains(fx->m_centerGroupID)) continue;
+            count++;
+            log::info("Smoke test: TRIGGER {} at {:.1f},{:.1f}: target {}, center {}, duration {:.2f}, move {:.1f},{:.1f} mode {}, "
+                "touch {}, spawn {}, multi {}, activate group {}", obj->m_objectID, x, obj->getPositionY(), fx->m_targetGroupID,
+                fx->m_centerGroupID, fx->m_duration, fx->m_moveOffset.x, fx->m_moveOffset.y,
+                static_cast<int>(fx->m_moveTargetMode), fx->m_isTouchTriggered, fx->m_isSpawnTriggered,
+                fx->m_isMultiTriggered, fx->m_activateGroup);
+        }
+        log::info("Smoke test: TRIGGERS {}: {} found", rest, count);
+        return next();
+    }
     if (op == "step_probe") {
         g_stepProbe.tag = rest;
         g_stepProbe.left = 1001;  // starts at the next step
@@ -2431,6 +2522,10 @@ bool keepsPlaying() {
     return g_smoke.active && !g_smoke.pausing;
 }
 
+bool takesSnapshots() {
+    return !g_smoke.active || g_smoke.snapshots;
+}
+
 void noticed(std::string const& text) {
     g_lastNotice = text;
 }
@@ -2471,6 +2566,41 @@ void beforeStep(PlayLayer* pl) {
             lastWarp = warp;
         }
         probeStep(pl);
+        // Player 1's speed other than a step before, however it changed.
+        static float lastSpeed = 0;
+        float speed = pl->m_player1->m_playerSpeed;
+        if (g_smoke.speedLog && std::abs(speed - lastSpeed) > 1e-4) {
+            log::info("Smoke test: SPEED {:.2f} -> {:.2f} by step {} (x {:.1f}), auto part {}", lastSpeed, speed, g_rec.step,
+                pl->m_player1->m_position.x,
+                g_play.sp && g_play.controlling ? fmt::format("SP {} step {}", g_play.sp->id, g_play.step) : std::string("none"));
+        }
+        lastSpeed = speed;
+        if (!std::isnan(g_smoke.checkpointAtX) && pl->m_player1->m_position.x >= g_smoke.checkpointAtX) {
+            g_smoke.checkpointAtX = NAN;
+            if (auto cp = pl->createCheckpoint()) {
+                pl->storeCheckpoint(cp);
+                log::info("Smoke test: practice checkpoint at {:.1f},{:.1f}, step {}, {} now", pl->m_player1->m_position.x,
+                    pl->m_player1->m_position.y, g_rec.step, pl->m_checkpointArray->count());
+                if (g_smoke.speedLog) dumpCommands(pl, "practice checkpoint placed", 2);
+            }
+        }
+        if (g_play.sp && g_play.controlling && g_play.step == 0) {
+            g_smoke.autoPartPresses = 0;
+            if (g_smoke.speedLog) dumpCommands(pl, fmt::format("SP {} auto part starts", g_play.sp->id), 2);
+        }
+        // The speed portals placed at watchX: where they are now, and the player.
+        if (!std::isnan(g_smoke.watchX) && g_rec.step % 8 == 0) {
+            std::string at;
+            for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+                if (obj->m_objectID < 200 || obj->m_objectID > 203 || std::abs(obj->m_startPosition.x - g_smoke.watchX) > 1) continue;
+                at += fmt::format(" {:.1f}{}", obj->getPositionY(), obj->m_groupCount > 1 && obj->m_groups &&
+                    std::find(obj->m_groups->begin(), obj->m_groups->begin() + obj->m_groupCount, 2) !=
+                    obj->m_groups->begin() + obj->m_groupCount ? "(g2)" : "");
+            }
+            log::info("Smoke test: WATCH step {}: player {:.1f},{:.1f} @{:.2f}, auto part {}, portals at x {:.1f}: y{}", g_rec.step,
+                pl->m_player1->m_position.x, pl->m_player1->m_position.y, pl->m_player1->m_playerSpeed,
+                g_play.sp && g_play.controlling ? fmt::format("step {}", g_play.step) : std::string("none"), g_smoke.watchX, at);
+        }
         // The state each step of an auto part starts from, and the inputs gone in so far.
         if (g_smoke.trace && g_play.sp && g_play.controlling) {
             auto p = pl->m_player1;
@@ -2635,6 +2765,116 @@ void probeSetup(PlayLayer* pl, std::string_view when) {
         pl->m_startPosObject ? fmt::format("at {:.0f}", pl->m_startPosObject->getPositionX()) : "none", pl->m_isTestMode,
         pl->m_levelLength, g_session.sps.size());
 }
+
+// Player 1's speed set anew ("speed_log:on"): by a speed portal, a startpos, a restart. Changes it gets some
+// other way (a checkpoint loaded) beforeStep logs.
+class $modify(SPCSmokeSpeedProbe, PlayerObject) {
+    void updateTimeMod(float speed, bool noEffects) {
+        float was = m_playerSpeed;
+        PlayerObject::updateTimeMod(speed, noEffects);
+        auto pl = PlayLayer::get();
+        if (!g_smoke.active || !g_smoke.speedLog || !pl || this != pl->m_player1) return;
+        log::info("Smoke test: SPEED SET {:.2f} -> {:.2f} (asked {:.2f}, no effects {}) at {:.1f},{:.1f}, step {}, auto part {}",
+            was, m_playerSpeed, speed, noEffects, m_position.x, m_position.y, g_rec.step,
+            g_play.sp && g_play.controlling ? fmt::format("SP {} step {}", g_play.sp->id, g_play.step) : std::string("none"));
+        // The speed portals near it, where they are now (triggers move them) and as the game has them.
+        static std::set<int> const portals = {200, 201, 202, 203, 1334};
+        for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) {
+            if (!portals.contains(obj->m_objectID) || std::abs(obj->getPositionX() - m_position.x) > 150) continue;
+            std::vector<int> groups;
+            for (short i = 0; obj->m_groups && i < obj->m_groupCount; i++) groups.push_back((*obj->m_groups)[i]);
+            log::info("Smoke test: SPEED SET near: portal {} at {:.1f},{:.1f} (placed at {:.1f},{:.1f}), groups [{}], "
+                "no effects {}, activated {}, disabled {}, visible {}, opacity {}", obj->m_objectID, obj->getPositionX(),
+                obj->getPositionY(), obj->m_startPosition.x, obj->m_startPosition.y, fmt::join(groups, " "),
+                obj->m_hasNoEffects, obj->m_isActivated, obj->m_isDisabled, obj->isVisible(), obj->getOpacity());
+        }
+    }
+};
+
+// Where the game is when it makes a player-follow command ("speed_log:on"): a restart, a checkpoint loading, a step.
+char const* g_smokeIn = "a step";
+
+class $modify(SPCSmokeFollowProbe, GJEffectManager) {
+    void createPlayerFollowCommand(float delay, float speed, int offset, float maxSpeed, float duration, int targetID,
+        int uniqueID, int controlID) {
+        if (g_smoke.active && g_smoke.speedLog) {
+            auto pl = PlayLayer::get();
+            log::info("Smoke test: FOLLOW Y command for group {} in {}: delay {:.2f}, speed {:.2f}, offset {}, max speed {:.2f}, "
+                "duration {:.2f}, unique {}, control {}; step {}, player {:.1f},{:.1f}", targetID, g_smokeIn, delay, speed, offset,
+                maxSpeed, duration, uniqueID, controlID, g_rec.step, pl ? pl->m_player1->m_position.x : 0.f,
+                pl ? pl->m_player1->m_position.y : 0.f);
+        }
+        GJEffectManager::createPlayerFollowCommand(delay, speed, offset, maxSpeed, duration, targetID, uniqueID, controlID);
+    }
+};
+
+class $modify(SPCSmokeResetProbe, PlayLayer) {
+    void resetLevel() {
+        auto was = std::exchange(g_smokeIn, "a restart");
+        PlayLayer::resetLevel();
+        g_smokeIn = was;
+    }
+
+    void loadFromCheckpoint(CheckpointObject* cp) {
+        auto was = std::exchange(g_smokeIn, "loading a checkpoint");
+        PlayLayer::loadFromCheckpoint(cp);
+        g_smokeIn = was;
+    }
+};
+
+std::string commandText(GroupCommandObject2 const& c) {
+    return fmt::format("type {} target {} duration {:.2f} elapsed {:.2f} finished {} disabled {} lock Y {} follow Y {:.2f} "
+        "offset {:.1f},{:.1f}", c.m_commandType, c.m_targetGroupID, c.m_duration, c.m_deltaTime, c.m_finished, c.m_disabled,
+        c.m_lockToPlayerY, c.m_followYMod, c.m_currentXOffset, c.m_currentYOffset);
+}
+
+// The group commands aimed at `group`: those running in the game now, and those in the active SP's checkpoint (the
+// run it was placed in, at its spawn).
+void dumpCommands(PlayLayer* pl, std::string_view tag, int group) {
+    auto em = pl->m_effectManager;
+    int count = 0;
+    auto live = [&](std::string_view where, gd::vector<GroupCommandObject2*> const& v) {
+        for (auto c : v) {
+            if (!c || c->m_targetGroupID != group) continue;
+            count++;
+            log::info("Smoke test: COMMANDS {}: live {}: {}", tag, where, commandText(*c));
+        }
+    };
+    live("518", em->m_unkVector518);
+    live("530", em->m_unkVector530);
+    live("5b0", em->m_unkVector5b0);
+    live("600", em->m_unkVector600);
+    for (auto const& c : em->m_unkVector560) {
+        if (c.m_targetGroupID != group) continue;
+        count++;
+        log::info("Smoke test: COMMANDS {}: live 560: {}", tag, commandText(c));
+    }
+    if (auto sp = g_session.active; sp && sp->cp) {
+        for (auto const& c : sp->cp->m_effectManagerState.m_vectorGroupCommandObject2) {
+            if (c.m_targetGroupID != group) continue;
+            count++;
+            log::info("Smoke test: COMMANDS {}: SP {} checkpoint: {}", tag, sp->id, commandText(c));
+        }
+    }
+    log::info("Smoke test: COMMANDS {}: {} for group {}", tag, count, group);
+}
+
+// Presses another mod sends (Eclipse's AutoClicker) while the auto part has the buttons: counted for the PLAY line.
+class $modify(SPCSmokePressProbe, GJBaseGameLayer) {
+    // Before the mod's own hook, which keeps such presses from the game.
+    static void onModify(auto& self) {
+        if (auto res = self.setHookPriority("GJBaseGameLayer::handleButton", Priority::VeryEarly); res.isErr()) {
+            log::error("Smoke test: can't set the priority of the handleButton probe: {}", res.unwrapErr());
+        }
+    }
+
+    void handleButton(bool down, int button, bool isPlayer1) {
+        if (g_smoke.active && down && g_play.sp && g_play.controlling && !g_play.injecting && static_cast<GJBaseGameLayer*>(PlayLayer::get()) == this) {
+            g_smoke.autoPartPresses++;
+        }
+        GJBaseGameLayer::handleButton(down, button, isPlayer1);
+    }
+};
 
 class $modify(SPCSmokeSetupProbe, PlayLayer) {
     void createObjectsFromSetupFinished() {
