@@ -22,6 +22,8 @@ namespace text {
         SPLabelNamed,     // {name} {position} {count} {percent}
         LevelStartPosLabel, // {percent}
         NotAnSP,
+        LevelStartPosesShown,  // {count}
+        LevelStartPosesHidden, // {count}
         Loaded,           // {count}
         Failed,           // {count}
         LevelChanged,

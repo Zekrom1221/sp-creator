@@ -3,6 +3,7 @@
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
+#include <Geode/ui/OverlayManager.hpp>
 
 #include "Core.hpp"
 #include "Smoke.hpp"
@@ -17,6 +18,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <unordered_set>
 
 using namespace geode::prelude;
 using text::Msg;
@@ -216,12 +218,20 @@ void useClockActions(CCNode* node) {
     for (auto child : CCArrayExt<CCNode*>(node->getChildren())) useClockActions(child);
 }
 
+// The clock actions on by the time since they were last ticked. Ticked again in the same frame (the notice about
+// the level's startposes has its own frames), they go on by nothing.
+void tickNoticeActions(std::chrono::steady_clock::time_point now) {
+    if (g_noticeActions) g_noticeActions->tick(std::chrono::duration<float>(now - g_noticeTickedAt).count());
+    g_noticeTickedAt = now;
+}
+
+bool g_levelNoticeTimed = false;  // levelNoticeFrame is queued
+
 // Once a frame (queueInMainThread runs what's queued meanwhile in the next frame), till the notification is
 // off the screen: its animations a frame on by the clock, and hidden on time.
 void noticeFrame() {
     auto now = std::chrono::steady_clock::now();
-    if (g_noticeActions) g_noticeActions->tick(std::chrono::duration<float>(now - g_noticeTickedAt).count());
-    g_noticeTickedAt = now;
+    tickNoticeActions(now);
     if (!g_notice) {
         g_noticeTimed = false;
         return;
@@ -248,7 +258,7 @@ void timeNotice(std::chrono::steady_clock::time_point now) {
     g_noticeHideAt = now + NOTICE_TIME;
     if (g_noticeTimed) return;
     g_noticeTimed = true;
-    g_noticeTickedAt = now;
+    if (!g_levelNoticeTimed) g_noticeTickedAt = now;
     Loader::get()->queueInMainThread(noticeFrame);
 }
 
@@ -314,6 +324,124 @@ void notify(std::string const& text, NotificationIcon icon = NotificationIcon::I
 template <class... Args>
 void notify(NotificationIcon icon, Msg msg, Args&&... args) {
     notify(text::format(msg, std::forward<Args>(args)...), icon);
+}
+
+// The notice on entering a level that has startposes of its own, at the same time as the mod's other notices
+// ("SPs loaded") and under them: Geode shows its notifications one at a time, so this one isn't in its queue. It
+// looks and moves as they do (Notification.cpp), by the clock too, LEVEL_NOTICE_TIME on screen.
+constexpr auto LEVEL_NOTICE_TIME = std::chrono::seconds(3);
+constexpr float NOTICE_FADEIN = 0.3f;
+constexpr float NOTICE_FADEOUT = 0.5f;
+constexpr float NOTICE_GAP = 4.f;
+
+class LevelNotice : public Notification {
+public:
+    static LevelNotice* create(std::string const& text) {
+        auto ret = new LevelNotice();
+        if (ret->init("", createIcon(NotificationIcon::Info), 0.f)) {
+            ret->autorelease();
+            setNoticeText(ret, text);
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+
+    float height() {
+        return this->getBG()->getContentSize().height * this->getScale();
+    }
+
+    float width() {
+        return this->getBG()->getContentSize().width * this->getScale();
+    }
+
+    // At `y`, faded and scaled in as Geode's.
+    void appear(float y) {
+        auto win = CCDirector::get()->getWinSize();
+        this->setPosition(win.width / 2, y);
+        auto scene = CCScene::get();
+        this->setZOrder(scene && scene->getChildrenCount() > 0 ? scene->getHighestChildZ() + 2 : 10);
+        OverlayManager::get()->addChild(this);
+        useClockActions(this);
+        for (CCNodeRGBA* part : {static_cast<CCNodeRGBA*>(this->getContent()), static_cast<CCNodeRGBA*>(this->getBG())}) {
+            part->setOpacity(0);
+            part->setScale(0.6f);
+            part->setPositionY(-60.f);
+            part->runAction(CCFadeTo::create(NOTICE_FADEIN, part == this->getBG() ? 150 : 255));
+            part->runAction(CCEaseExponentialOut::create(CCScaleTo::create(NOTICE_FADEIN, 1.f, 1.f)));
+            part->runAction(CCEaseExponentialOut::create(CCMoveBy::create(NOTICE_FADEIN, {0.f, 60.f})));
+        }
+    }
+
+    // Faded and scaled out as Geode's, then off the screen.
+    void disappear() {
+        for (CCNodeRGBA* part : {static_cast<CCNodeRGBA*>(this->getContent()), static_cast<CCNodeRGBA*>(this->getBG())}) {
+            part->stopAllActions();
+            part->runAction(CCEaseExponentialIn::create(CCFadeTo::create(NOTICE_FADEOUT, 0)));
+            part->runAction(CCEaseExponentialIn::create(CCMoveBy::create(NOTICE_FADEOUT, {0.f, -25.f})));
+            part->runAction(CCSequence::create(CCDelayTime::create(NOTICE_FADEOUT * 0.25f),
+                CCEaseExponentialIn::create(CCScaleTo::create(NOTICE_FADEOUT, 0.2f, 0.2f)), nullptr));
+        }
+        this->runAction(CCSequence::create(CCDelayTime::create(NOTICE_FADEOUT), CallFuncExt::create([this] {
+            this->remove();
+        }), nullptr));
+    }
+
+    void remove() {
+        OverlayManager::get()->removeChild(this);
+        this->removeFromParent();
+    }
+};
+
+Ref<LevelNotice> g_levelNotice;
+std::chrono::steady_clock::time_point g_levelNoticeAt;
+bool g_levelNoticeHiding = false;
+// Levels the notice was shown in since the game started (their SP folders, or ID and name where SPs aren't saved).
+std::unordered_set<std::string> g_levelNoticeShown;
+
+void levelNoticeFrame() {
+    auto now = std::chrono::steady_clock::now();
+    tickNoticeActions(now);
+    if (!g_levelNotice || (g_levelNoticeHiding && !g_levelNotice->getParent())) {
+        g_levelNotice = nullptr;
+        g_levelNoticeTimed = false;
+        return;
+    }
+    if (!g_levelNoticeHiding && now - g_levelNoticeAt >= LEVEL_NOTICE_TIME) {
+        g_levelNoticeHiding = true;
+        g_levelNotice->disappear();
+        log::info("Notice about the level's startposes hidden after {} ms",
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - g_levelNoticeAt).count());
+    }
+    Loader::get()->queueInMainThread(levelNoticeFrame);
+}
+
+// On entering a level with `count` startposes of its own (`hidden` by the mod): once a level since the game started.
+void levelStartPosNotice(PlayLayer* pl, size_t count, bool hidden) {
+    if (count == 0 || !Mod::get()->getSettingValue<bool>("startpos-notice")) return;
+    auto info = storage::level();
+    auto key = info ? info->key : fmt::format("{} {}", pl->m_level->m_levelID.value(), std::string(pl->m_level->m_levelName));
+    if (!g_levelNoticeShown.insert(key).second) return;
+    auto text = text::format(hidden ? Msg::LevelStartPosesHidden : Msg::LevelStartPosesShown, count);
+    log::info("Notice about the level's startposes: {}", text);
+    // One a level: one left from the level before goes at once.
+    if (g_levelNotice) g_levelNotice->remove();
+    g_levelNotice = LevelNotice::create(text);
+    auto oneLine = LevelNotice::create(std::string(text::tr(Msg::LevelStart)));
+    if (!g_levelNotice || !oneLine) return;
+    // Geode's notifications stand at a quarter of the screen's height: this one's top under where theirs ends.
+    auto win = CCDirector::get()->getWinSize();
+    float y = win.height / 4 - oneLine->height() / 2 - NOTICE_GAP - g_levelNotice->height() / 2;
+    g_levelNotice->appear(y);
+    log::info("Notice about the level's startposes: {:.0f}x{:.0f} at y {:.0f} on a {:.0f}x{:.0f} screen",
+        g_levelNotice->width(), g_levelNotice->height(), y, win.width, win.height);
+    auto now = std::chrono::steady_clock::now();
+    g_levelNoticeAt = now;
+    g_levelNoticeHiding = false;
+    if (g_levelNoticeTimed) return;
+    g_levelNoticeTimed = true;
+    if (!g_noticeTimed) g_noticeTickedAt = now;
+    Loader::get()->queueInMainThread(levelNoticeFrame);
 }
 
 PlayerFrame capturePlayer(PlayerObject* p) {
@@ -1569,6 +1697,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         std::vector<std::pair<GameObject*, GameObject*>> blanks;
         for (auto const& h : g_session.hidden) blanks.push_back({h.startPos.data(), h.blank.data()});
         storage::hide(this, blanks);
+        size_t hiddenCount = g_session.hidden.size();
         g_session.hidden.clear();
         smoke::loaded(this, loaded);
         g_session.sps = std::move(loaded.sps);
@@ -1577,6 +1706,8 @@ class $modify(SPCPlayLayer, PlayLayer) {
         // their unique IDs) whatever the SPs. Each SP takes the object made for it early (madeEarly).
         for (auto const& sp : g_session.sps) addObjectFor(this, *sp);
         notifyLoaded(loaded, g_session.sps.size());
+        if (g_session.levelShown) levelStartPosNotice(this, g_session.levelStartPoses.size(), false);
+        else levelStartPosNotice(this, hiddenCount, true);
         smoke::ready(this);
     }
 

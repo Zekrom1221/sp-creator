@@ -61,6 +61,12 @@
             "name": "Hide the level's startposes",
             "description": "Other mods (startpos switchers, Blitzkrieg) see only your SPs, not the startposes the level has. The level still starts where it does. Applies when you next enter a level."
         },
+        "startpos-notice": {
+            "type": "bool",
+            "default": true,
+            "name": "Notice about the level's startposes",
+            "description": "On entering a level that has startposes of its own (the first time since the game started), a notice says whether they're hidden and which setting changes that."
+        },
         "prev-sp": {
             "type": "keybind",
             "default": "OEMComma",

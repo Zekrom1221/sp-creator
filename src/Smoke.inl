@@ -2204,6 +2204,21 @@ void nextAction() {
             g_lastNotice);
         return next();
     }
+    // The game's time slowed down or sped up as a speedhack does (Eclipse's scales the scheduler's time), put back
+    // at the end.
+    if (op == "time_scale") {
+        auto scheduler = CCDirector::get()->getScheduler();
+        float was = scheduler->getTimeScale();
+        t.restores.push_back([was] { CCDirector::get()->getScheduler()->setTimeScale(was); });
+        scheduler->setTimeScale(utils::numFromString<float>(rest).unwrapOr(1.f));
+        log::info("Smoke test: time scale {} now (was {})", scheduler->getTimeScale(), was);
+        return next();
+    }
+    // The notice about the level's startposes as if no level had shown it since the game started.
+    if (op == "level_notice_reset") {
+        g_levelNoticeShown.clear();
+        return next();
+    }
     // A startpos of the level in the switcher (by x) disabled, as its Disable checkbox does.
     if (op == "disable_startpos") {
         size_t i = static_cast<size_t>(arg(0, 0));
