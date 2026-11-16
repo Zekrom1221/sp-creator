@@ -2624,9 +2624,13 @@ void beforeStep(PlayLayer* pl) {
                 }
                 log::info("Smoke test: TRACE SP {} frames:{}", g_play.sp->id, around);
             }
+            auto const& fr = g_play.sp->frames;
+            auto const& rec = fr[std::min(static_cast<size_t>(std::max(0L, std::lround(g_play.cursor))), fr.size() - 1)];
+            auto cam = pl->m_gameState.m_cameraPosition;
             log::info("Smoke test: TRACE SP {} step {} at {:.3f}: x {:.3f}, y {:.3f}, yVel {:.4f}, rot {:.1f}, {}, on ground {}, "
-                "inputs in {}, holds {}", g_play.sp->id, g_play.step, g_play.cursor, p->m_position.x, p->m_position.y,
-                p->m_yVelocity, p->getRotation(), modeOf(pl), p->m_isOnGround, g_play.nextInput, g_play.gameHolds[1]);
+                "inputs in {}, holds {}, camera {:.1f},{:.1f} (recorded {:.1f},{:.1f})", g_play.sp->id, g_play.step,
+                g_play.cursor, p->m_position.x, p->m_position.y, p->m_yVelocity, p->getRotation(), modeOf(pl),
+                p->m_isOnGround, g_play.nextInput, g_play.gameHolds[1], cam.x, cam.y, rec.camX, rec.camY);
         }
         smokeStep(pl);
     }
@@ -2841,6 +2845,19 @@ class $modify(SPCSmokeFormProbe, PlayerObject) {
     SPC_SMOKE_FORM_PROBE(toggleSpiderMode, "spider")
     SPC_SMOKE_FORM_PROBE(toggleSwingMode, "swing")
     SPC_SMOKE_FORM_PROBE(togglePlayerScale, "mini")
+
+    void switchedToMode(GameObjectType type) {
+        auto pl = PlayLayer::get();
+        bool watch = g_smoke.active && g_smoke.trace && pl && this == pl->m_player1;
+        if (watch) {
+            log::info("Smoke test: FORM switchedToMode {} in {}: was {}, step {}, auto part {}", static_cast<int>(type), g_smokeIn,
+                formOf(this), g_rec.step, g_play.sp && g_play.controlling ? fmt::format("SP {} step {}", g_play.sp->id, g_play.step)
+                                                                          : std::string("none"));
+        }
+        auto was = std::exchange(g_smokeIn, "switchedToMode");
+        PlayerObject::switchedToMode(type);
+        g_smokeIn = was;
+    }
 
     void loadFromCheckpoint(PlayerCheckpoint* cp) {
         auto pl = PlayLayer::get();
