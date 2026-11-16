@@ -96,6 +96,7 @@ struct Playback {
     // Largest difference from the original run: in the auto part before guiding, then after the handoff.
     float autoX = 0, autoY = 0, autoCam = 0;
     float tailX = 0, tailY = 0, tailCam = 0;
+    bool formKept = false;  // another mod's form switch before the first step left out (othersSwitchForm)
 };
 
 // A startpos of the level hidden from other mods while the level creates its objects, and the blank object
@@ -138,6 +139,8 @@ struct Session {
     // Objects of deleted SPs, out of the level: another mod's switcher may still have one and pick it.
     // New SPs get them first (addObjectFor).
     std::vector<Ref<StartPosObject>> retired;
+    // The x of the startpos the last attempt started from (the level start: -infinity): which way a switcher went.
+    float startedAtX = -std::numeric_limits<float>::infinity();
     int objectsMade = 0;                           // through addObject
     bool madeEarly = false;                        // the SPs' objects made as the level finished its own (madeEarly)
     StartPosObject* levelStartPos = nullptr;       // the startpos the level itself picked (owned by the level)
@@ -742,6 +745,8 @@ void choose(std::shared_ptr<StartPoint> sp, bool now = false) {
     choose(Entry{std::move(sp)}, now);
 }
 
+Entry pastDeleted(StartPosObject* obj);
+
 // Before resetLevel. Whoever set the startpos last decides where the attempt starts: this mod, or
 // another mod's switcher, which may pick an SP's object too. Then the game's startpos retry path gets
 // the SP's checkpoint, or the level its own start back.
@@ -749,7 +754,13 @@ void applyActiveSP(PlayLayer* pl) {
     auto& s = g_session;
     bool foreign = pl->m_startPosObject != s.startPosWhenChosen || pl->m_currentCheckpoint != s.checkpointWhenChosen;
     bool picked = s.chosen && (!foreign || s.chosenNow);
-    if (!picked) {
+    if (!picked && isRetired(pl->m_startPosObject)) {
+        auto to = pastDeleted(pl->m_startPosObject);
+        s.active = to.sp;
+        s.activeLevel = to.startPos;
+        picked = true;
+    }
+    else if (!picked) {
         s.active = spOf(pl->m_startPosObject);
         s.activeLevel = s.active ? nullptr : levelStartPosOf(pl->m_startPosObject);
     }
@@ -880,18 +891,65 @@ void endAutoPart(PlayLayer* pl, bool early, geode::Function<void(int index, bool
 }
 
 // Before a step of an attempt that started from an SP.
+// Has the player the checkpoint's form?
+bool sameForm(PlayerObject* p, PlayerCheckpoint* c) {
+    return p->m_isShip == c->m_isShip && p->m_isBall == c->m_isBall && p->m_isBird == c->m_isBird && p->m_isDart == c->m_isDart
+        && p->m_isRobot == c->m_isRobot && p->m_isSpider == c->m_isSpider && p->m_isSwing == c->m_isSwing;
+}
+
 // Is the player what the checkpoint makes it: form, size, speed, gravity, direction?
 bool asInCheckpoint(PlayerObject* p, PlayerCheckpoint* c) {
-    return p->m_isShip == c->m_isShip && p->m_isBall == c->m_isBall && p->m_isBird == c->m_isBird && p->m_isDart == c->m_isDart
-        && p->m_isRobot == c->m_isRobot && p->m_isSpider == c->m_isSpider && p->m_isSwing == c->m_isSwing
+    return sameForm(p, c)
         && (p->m_vehicleSize < 1.f) == c->m_isMini && std::abs(p->m_playerSpeed - c->m_playerSpeed) < 0.001f
         && p->m_isUpsideDown == c->m_isUpsideDown && p->m_isSideways == c->m_isSideways
         && p->m_isGoingLeft == c->m_isGoingLeft;
 }
 
+// The player back to a cube, as a restart makes it before loading the checkpoint: loading one turns its form on,
+// not another one off.
+void toCube(PlayerObject* p) {
+    if (p->m_isShip) p->toggleFlyMode(false, false);
+    if (p->m_isBall) p->toggleRollMode(false, false);
+    if (p->m_isBird) p->toggleBirdMode(false, false);
+    if (p->m_isDart) p->toggleDartMode(false, false);
+    if (p->m_isRobot) p->toggleRobotMode(false, false);
+    if (p->m_isSpider) p->toggleSpiderMode(false, false);
+    if (p->m_isSwing) p->toggleSwingMode(false, false);
+}
+
+// What Mega Hack's Smart StartPos writes in the game's state with the form it gives, before the first step (the bot's
+// dumps in Storming Summit and RAM): the mode's camera height and the portal the player would have come through.
+// Storming Summit's camera stayed at a ship's height for the cube. A restart from an SP changes some of them itself
+// in places, and as the checkpoint has them the camera follows the run closer there too (Storming Summit: 9 units
+// off at most instead of 20).
+std::vector<char const*> portalStateBack(GJGameState& gs, GJGameState const& c) {
+    std::vector<char const*> back;
+    auto field = [&](auto& now, auto const& was, char const* name) {
+        if (std::memcmp(&now, &was, sizeof now) == 0) return;
+        now = was;
+        back.push_back(name);
+    };
+    field(gs.m_unkPoint5, c.m_unkPoint5, "unkPoint5");
+    field(gs.m_unkPoint6, c.m_unkPoint6, "unkPoint6");
+    field(gs.m_unkPoint7, c.m_unkPoint7, "unkPoint7");
+    field(gs.m_unkPoint10, c.m_unkPoint10, "unkPoint10");
+    field(gs.m_unkPoint11, c.m_unkPoint11, "unkPoint11");
+    field(gs.m_unkPoint17, c.m_unkPoint17, "unkPoint17");
+    field(gs.m_lastModeHeight, c.m_lastModeHeight, "lastModeHeight");
+    field(gs.m_portalY, c.m_portalY, "portalY");
+    field(gs.m_unkInt14, c.m_unkInt14, "unkInt14");
+    field(gs.m_unkBool7, c.m_unkBool7, "unkBool7");
+    field(gs.m_lastActivatedPortal1, c.m_lastActivatedPortal1, "lastActivatedPortal1");
+    field(gs.m_lastActivatedPortal2, c.m_lastActivatedPortal2, "lastActivatedPortal2");
+    field(gs.m_dualAnimationProgress, c.m_dualAnimationProgress, "dualAnimationProgress");
+    field(gs.m_dualRelated, c.m_dualRelated, "dualRelated");
+    return back;
+}
+
 // Another mod may change the player after the restart, past the checkpoint: Mega Hack's Smart StartPos gives it
-// the form, speed and size it works out for the startpos (Dash: a cube at 0.9 where the run was a ball at 1.3).
-// The SP's checkpoint wins, before the first step.
+// the form, speed and size it works out for the startpos (Dash: a cube at 0.9 where the run was a ball at 1.3;
+// Storming Summit: a ship where it was a cube), before the game's first step. The SP's checkpoint wins, before
+// that step too.
 void undoOthersAtSpawn(PlayLayer* pl, StartPoint const& sp) {
     auto cp = sp.cp.data();
     if (!cp) return;
@@ -899,8 +957,10 @@ void undoOthersAtSpawn(PlayLayer* pl, StartPoint const& sp) {
     std::vector<std::string> undone;
     auto player = [&](PlayerObject* p, PlayerCheckpoint* c, char const* which) {
         if (!p || !c || asInCheckpoint(p, c)) return;
+        if (!sameForm(p, c)) toCube(p);
         p->loadFromCheckpoint(c);
         undone.push_back(which);
+        if (!asInCheckpoint(p, c)) log::warn("SP {}: {} still not as in its checkpoint after putting it back", sp.id, which);
     };
     player(pl->m_player1, cp->m_player1Checkpoint, "player 1");
     if (gs.m_isDualMode) player(pl->m_player2, cp->m_player2Checkpoint, "player 2");
@@ -908,12 +968,14 @@ void undoOthersAtSpawn(PlayLayer* pl, StartPoint const& sp) {
         pl->toggleFlipped(cp->m_gameState.m_isFlipped, true);
         undone.push_back("mirror");
     }
+    bool dual = gs.m_isDualMode != cp->m_gameState.m_isDualMode;
+    if (auto back = portalStateBack(gs, cp->m_gameState); !back.empty()) {
+        undone.push_back(fmt::format("game state ({})", fmt::join(back, ", ")));
+    }
     if (!undone.empty()) {
         log::info("SP {}: changed after the restart, put back as in its checkpoint: {}", sp.id, fmt::join(undone, ", "));
     }
-    if (gs.m_isDualMode != cp->m_gameState.m_isDualMode) {
-        log::warn("SP {}: dual changed after the restart, not put back", sp.id);
-    }
+    if (dual) log::warn("SP {}: dual changed after the restart, not put back", sp.id);
 }
 
 // The recorded state at c (in steps: another tick rate) to put the player in, as frameAt has it; `nextInput`: the
@@ -1075,6 +1137,45 @@ std::vector<Entry> entries() {
     }
     for (; level != s.levelStartPoses.end(); ++level) out.push_back({nullptr, level->object});
     return out;
+}
+
+float xOf(Entry const& e) {
+    if (e.sp) return e.sp->x;
+    if (e.startPos) return e.startPos->getPositionX();
+    return -std::numeric_limits<float>::infinity();
+}
+
+// A switcher that keeps the startposes it collected and goes on from the one the attempt started at (Mega Hack's)
+// may pick a deleted SP's object. Sent to the level start from there, it would pick the same object again, and the
+// player could never get past it. So restarts go on past it the way the switcher went from where the last attempt
+// started: to the next SP or startpos of the level in the switcher that way, or the level start when there's none
+// (as switchers go round). Entries between the two mean it went round the end of its list instead (Mega Hack's
+// previous one from the level start is its last): then the other way.
+Entry pastDeleted(StartPosObject* obj) {
+    float x = obj->getPositionX();
+    float from = g_session.startedAtX;
+    std::vector<Entry> live;
+    for (auto const& e : entries()) {
+        if (!e.sp || e.sp->object) live.push_back(e);
+    }
+    bool ahead = x > from;
+    bool between = std::any_of(live.begin(), live.end(), [&](Entry const& e) {
+        float ex = xOf(e);
+        return ex > std::min(x, from) && ex < std::max(x, from);
+    });
+    if (between) ahead = !ahead;
+    Entry to;
+    if (ahead) {
+        auto it = std::find_if(live.begin(), live.end(), [&](Entry const& e) { return xOf(e) > x; });
+        if (it != live.end()) to = *it;
+    }
+    else {
+        auto it = std::find_if(live.rbegin(), live.rend(), [&](Entry const& e) { return xOf(e) < x; });
+        if (it != live.rend()) to = *it;
+    }
+    log::info("A switcher picked a deleted SP's object at x {:.1f} (the last attempt from x {:.1f}): on {} to {}", x,
+        from, ahead ? "ahead" : "back", labelOf(to));
+    return to;
 }
 
 bool canUseKeys(PlayLayer* pl) {
@@ -1524,7 +1625,43 @@ class $modify(SPCBaseLayer, GJBaseGameLayer) {
     }
 };
 
+// Between a restart from an SP and its first step the game switches no player's form: another mod does (Mega Hack's
+// Smart StartPos, with the form it works out for the startpos: Storming Summit's ship where the run was a cube, the
+// ship's camera height left in the game's state). The SP's checkpoint has the form already: it stays.
+bool othersSwitchForm(PlayerObject* p, char const* what) {
+    auto pl = PlayLayer::get();
+    if (!pl || !g_play.sp || !g_play.controlling || g_play.step != 0 || (p != pl->m_player1 && p != pl->m_player2)) {
+        return false;
+    }
+    if (!g_play.formKept) {
+        g_play.formKept = true;
+        log::info("SP {}: another mod switches the player's form before the first step ({}): it stays as in the SP's checkpoint",
+            g_play.sp->id, what);
+    }
+    return true;
+}
+
+#define SPC_FORM_KEPT(name)                                                                                       \
+    void name(bool enable, bool noEffects) {                                                                      \
+        if (othersSwitchForm(this, #name)) return;                                                                \
+        PlayerObject::name(enable, noEffects);                                                                    \
+    }
+
 class $modify(SPCPlayer, PlayerObject) {
+    SPC_FORM_KEPT(toggleFlyMode)
+    SPC_FORM_KEPT(toggleRollMode)
+    SPC_FORM_KEPT(toggleBirdMode)
+    SPC_FORM_KEPT(toggleDartMode)
+    SPC_FORM_KEPT(toggleRobotMode)
+    SPC_FORM_KEPT(toggleSpiderMode)
+    SPC_FORM_KEPT(toggleSwingMode)
+    SPC_FORM_KEPT(togglePlayerScale)
+
+    void switchedToMode(GameObjectType type) {
+        if (othersSwitchForm(this, "switchedToMode")) return;
+        PlayerObject::switchedToMode(type);
+    }
+
     bool pushButton(PlayerButton button) {
         // A button held since before an SP's checkpoint (holdAgain): held, and nothing else a press does.
         if (g_play.holdOnly) {
@@ -1534,6 +1671,8 @@ class $modify(SPCPlayer, PlayerObject) {
         return PlayerObject::pushButton(button);
     }
 };
+
+#undef SPC_FORM_KEPT
 
 // Other mods find the level's startposes in PlayLayer::addObject as the level creates them (switchers collect
 // them there), or later in m_objects (Blitzkrieg, from the pause menu). Hidden from them (the setting): the
@@ -1688,6 +1827,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         g_session.hiding = false;
         g_session.levelStartPos = m_startPosObject;
         g_session.levelTestMode = m_isTestMode;
+        if (m_startPosObject) g_session.startedAtX = m_startPosObject->getPositionX();
         PlayLayer::setupHasCompleted();
         if (g_session.levelShown) collectLevelStartPoses(this);
         auto loaded = storage::load(this);
@@ -1728,6 +1868,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         placeObjects();
         startPlayback(this);
         auto& s = g_session;
+        s.startedAtX = m_startPosObject ? m_startPosObject->getPositionX() : -std::numeric_limits<float>::infinity();
         if (s.lastCheckpoint) s.lastCheckpointRetains = s.lastCheckpoint->retainCount();
         smoke::restarted(this);
     }
