@@ -18,7 +18,6 @@
 #include <deque>
 #include <memory>
 #include <optional>
-#include <unordered_set>
 
 using namespace geode::prelude;
 using text::Msg;
@@ -329,7 +328,7 @@ void notify(NotificationIcon icon, Msg msg, Args&&... args) {
 // The notice on entering a level that has startposes of its own, at the same time as the mod's other notices
 // ("SPs loaded") and under them: Geode shows its notifications one at a time, so this one isn't in its queue. It
 // looks and moves as they do (Notification.cpp), by the clock too, LEVEL_NOTICE_TIME on screen.
-constexpr auto LEVEL_NOTICE_TIME = std::chrono::seconds(3);
+constexpr auto LEVEL_NOTICE_TIME = std::chrono::seconds(4);
 constexpr float NOTICE_FADEIN = 0.3f;
 constexpr float NOTICE_FADEOUT = 0.5f;
 constexpr float NOTICE_GAP = 4.f;
@@ -396,8 +395,6 @@ public:
 Ref<LevelNotice> g_levelNotice;
 std::chrono::steady_clock::time_point g_levelNoticeAt;
 bool g_levelNoticeHiding = false;
-// Levels the notice was shown in since the game started (their SP folders, or ID and name where SPs aren't saved).
-std::unordered_set<std::string> g_levelNoticeShown;
 
 void levelNoticeFrame() {
     auto now = std::chrono::steady_clock::now();
@@ -416,16 +413,16 @@ void levelNoticeFrame() {
     Loader::get()->queueInMainThread(levelNoticeFrame);
 }
 
-// On entering a level with `count` startposes of its own (`hidden` by the mod): once a level since the game started.
-void levelStartPosNotice(PlayLayer* pl, size_t count, bool hidden) {
+// On entering a level with `count` startposes of its own (`hidden` by the mod), each time.
+void levelStartPosNotice(size_t count, bool hidden) {
     if (count == 0 || !Mod::get()->getSettingValue<bool>("startpos-notice")) return;
-    auto info = storage::level();
-    auto key = info ? info->key : fmt::format("{} {}", pl->m_level->m_levelID.value(), std::string(pl->m_level->m_levelName));
-    if (!g_levelNoticeShown.insert(key).second) return;
     auto text = text::format(hidden ? Msg::LevelStartPosesHidden : Msg::LevelStartPosesShown, count);
     log::info("Notice about the level's startposes: {}", text);
     // One a level: one left from the level before goes at once.
-    if (g_levelNotice) g_levelNotice->remove();
+    if (g_levelNotice && g_levelNotice->getParent()) {
+        log::info("Notice about the level's startposes: the one from before taken off");
+        g_levelNotice->remove();
+    }
     g_levelNotice = LevelNotice::create(text);
     auto oneLine = LevelNotice::create(std::string(text::tr(Msg::LevelStart)));
     if (!g_levelNotice || !oneLine) return;
@@ -1706,8 +1703,8 @@ class $modify(SPCPlayLayer, PlayLayer) {
         // their unique IDs) whatever the SPs. Each SP takes the object made for it early (madeEarly).
         for (auto const& sp : g_session.sps) addObjectFor(this, *sp);
         notifyLoaded(loaded, g_session.sps.size());
-        if (g_session.levelShown) levelStartPosNotice(this, g_session.levelStartPoses.size(), false);
-        else levelStartPosNotice(this, hiddenCount, true);
+        if (g_session.levelShown) levelStartPosNotice(g_session.levelStartPoses.size(), false);
+        else levelStartPosNotice(hiddenCount, true);
         smoke::ready(this);
     }
 

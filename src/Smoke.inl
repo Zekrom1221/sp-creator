@@ -2214,9 +2214,19 @@ void nextAction() {
         log::info("Smoke test: time scale {} now (was {})", scheduler->getTimeScale(), was);
         return next();
     }
-    // The notice about the level's startposes as if no level had shown it since the game started.
-    if (op == "level_notice_reset") {
-        g_levelNoticeShown.clear();
+    // The notices about the level's startposes on the screen now (one at most).
+    if (op == "level_notices") {
+        int count = 0;
+        for (auto node : CCArrayExt<CCNode*>(OverlayManager::get()->getChildren())) {
+            if (typeinfo_cast<LevelNotice*>(node)) count++;
+        }
+        log::info("Smoke test: LEVEL NOTICES {}: {} on the screen, timed {}, hiding {}", rest, count,
+            g_levelNoticeTimed, g_levelNoticeHiding);
+        return next();
+    }
+    // The notice about the level's startposes once more at once, as entering again while it's up would show it.
+    if (op == "level_notice_again") {
+        levelStartPosNotice(static_cast<size_t>(arg(0, 2)), !g_session.levelShown);
         return next();
     }
     // A startpos of the level in the switcher (by x) disabled, as its Disable checkbox does.

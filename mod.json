@@ -65,7 +65,7 @@
             "type": "bool",
             "default": true,
             "name": "Notice about the level's startposes",
-            "description": "On entering a level that has startposes of its own (the first time since the game started), a notice says whether they're hidden and which setting changes that."
+            "description": "On entering a level that has startposes of its own, a notice says whether they're hidden and which setting changes that."
         },
         "prev-sp": {
             "type": "keybind",
