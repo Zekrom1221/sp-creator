@@ -2256,6 +2256,11 @@ void nextAction() {
         g_smoke.speedLog = rest == "on";
         return next();
     }
+    // The next hit outside an auto part a real death (no noclip): another mod's switch after death, a respawn.
+    if (op == "die_next") {
+        t.dying = true;
+        return next();
+    }
     if (op == "practice") {
         pl->togglePracticeMode(rest != "off");
         log::info("Smoke test: practice {}", pl->m_isPracticeMode);
@@ -2807,6 +2812,53 @@ class $modify(SPCSmokeFollowProbe, GJEffectManager) {
         GJEffectManager::createPlayerFollowCommand(delay, speed, offset, maxSpeed, duration, targetID, uniqueID, controlID);
     }
 };
+
+// Player 1's form switched ("trace:on"): by whom (a restart, a checkpoint loading, a step), and the player loaded
+// from a player checkpoint (how the mod puts back what another mod changed after a restart), form before and after.
+std::string formOf(PlayerObject* p) {
+    return p->m_isShip ? "ship" : p->m_isBall ? "ball" : p->m_isBird ? "ufo" : p->m_isDart ? "wave" : p->m_isRobot ? "robot"
+        : p->m_isSpider ? "spider" : p->m_isSwing ? "swing" : "cube";
+}
+
+#define SPC_SMOKE_FORM_PROBE(name, form)                                                                          \
+    void name(bool enable, bool noEffects) {                                                                      \
+        auto pl = PlayLayer::get();                                                                               \
+        if (g_smoke.active && g_smoke.trace && pl && this == pl->m_player1) {                                     \
+            log::info("Smoke test: FORM {} {} (no effects {}) in {}: was {}, step {}, auto part {}", form,        \
+                enable ? "on" : "off", noEffects, g_smokeIn, formOf(this), g_rec.step,                            \
+                g_play.sp && g_play.controlling ? fmt::format("SP {} step {}", g_play.sp->id, g_play.step)        \
+                                                : std::string("none"));                                           \
+        }                                                                                                         \
+        PlayerObject::name(enable, noEffects);                                                                    \
+    }
+
+class $modify(SPCSmokeFormProbe, PlayerObject) {
+    SPC_SMOKE_FORM_PROBE(toggleFlyMode, "ship")
+    SPC_SMOKE_FORM_PROBE(toggleRollMode, "ball")
+    SPC_SMOKE_FORM_PROBE(toggleBirdMode, "ufo")
+    SPC_SMOKE_FORM_PROBE(toggleDartMode, "wave")
+    SPC_SMOKE_FORM_PROBE(toggleRobotMode, "robot")
+    SPC_SMOKE_FORM_PROBE(toggleSpiderMode, "spider")
+    SPC_SMOKE_FORM_PROBE(toggleSwingMode, "swing")
+    SPC_SMOKE_FORM_PROBE(togglePlayerScale, "mini")
+
+    void loadFromCheckpoint(PlayerCheckpoint* cp) {
+        auto pl = PlayLayer::get();
+        bool watch = g_smoke.active && g_smoke.trace && pl && this == pl->m_player1;
+        auto before = watch ? formOf(this) : std::string();
+        auto was = std::exchange(g_smokeIn, "a player checkpoint loading");
+        PlayerObject::loadFromCheckpoint(cp);
+        g_smokeIn = was;
+        if (watch) {
+            log::info("Smoke test: PLAYER CHECKPOINT loaded in {}: {} -> {} (the checkpoint's: ship {}, ball {}, ufo {}, "
+                "wave {}, robot {}, spider {}, swing {}, mini {}, speed {:.2f}), step {}", g_smokeIn, before, formOf(this),
+                cp->m_isShip, cp->m_isBall, cp->m_isBird, cp->m_isDart, cp->m_isRobot, cp->m_isSpider, cp->m_isSwing,
+                cp->m_isMini, cp->m_playerSpeed, g_rec.step);
+        }
+    }
+};
+
+#undef SPC_SMOKE_FORM_PROBE
 
 class $modify(SPCSmokeResetProbe, PlayLayer) {
     void resetLevel() {
