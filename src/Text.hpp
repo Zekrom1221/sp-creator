@@ -28,6 +28,7 @@ namespace text {
         Failed,           // {count}
         LevelChanged,
         CantSave,
+        OutOfOrder,
         CantMoveAside,
         ListTitle,
         ListEmpty,        // {key}

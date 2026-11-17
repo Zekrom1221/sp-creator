@@ -89,6 +89,24 @@ struct Level {
 
 // The open level's folder name, set before load() can give up on it (its SPs not loaded, nor saved).
 std::string g_openKey;
+bool g_outOfOrder = false;  // load() gave up on the level: its objects were out of order
+
+// While a big level makes its objects, a batch a frame, other mods make objects of their own in between: Globed
+// makes two players for every other player in the level. With the game's counter, those would take unique IDs
+// from the middle of the level's and shift every level object after them. Between the batches, the counter runs
+// from FOREIGN_FIRST_ID instead, far past any level's objects, and the level's goes on where it stopped.
+constexpr int FOREIGN_FIRST_ID = 0x40000000;
+struct Loading {
+    PlayLayer* layer = nullptr;  // only compared
+    bool on = false;        // between the level's first batch and its last
+    bool foreign = false;   // the counter is the foreign one now
+    int levelNext = 0;      // the level's counter while the foreign one runs
+    int batches = 0;
+    int foreignMade = 0;    // unique IDs other mods' objects took between the batches
+};
+Loading g_loading;
+// Not set back for each level: objects other mods keep from one level to the next keep IDs of their own.
+int g_foreignNext = FOREIGN_FIRST_ID;
 
 // The level's own startposes hidden from other mods (storage::hide()): while the blanks are in m_objects, a
 // blank object stands in the place of each.
@@ -1217,6 +1235,32 @@ bool isVersionOfLevel(std::filesystem::path const& dir) {
     return false;
 }
 
+int& idCounter() {
+    return *reinterpret_cast<int*>(geode::base::get() + UNIQUE_ID_COUNTER);
+}
+
+bool loading(PlayLayer* pl) {
+    return g_loading.on && g_loading.layer == pl;
+}
+
+// The level's counter back, if the foreign one runs.
+void levelCounterBack() {
+    if (!g_loading.foreign) return;
+    // Never back: another mod may have set the counter itself in between.
+    if (int now = idCounter(); now > g_foreignNext) {
+        g_loading.foreignMade += now - g_foreignNext;
+        g_foreignNext = now;
+    }
+    idCounter() = g_loading.levelNext;
+    g_loading.foreign = false;
+}
+
+#ifdef SPC_SMOKE
+bool g_foreignCounterOn = true;
+#else
+constexpr bool g_foreignCounterOn = true;
+#endif
+
 }
 
 namespace storage {
@@ -1225,16 +1269,56 @@ namespace storage {
 void setRoot(std::string_view utf8) {
     g_root = utils::string::utf8ToWide(utf8);
 }
+
+void foreignCounter(bool on) {
+    g_foreignCounterOn = on;
+}
 #endif
 
-void beforeCreatingObjects() {
-    *reinterpret_cast<int*>(geode::base::get() + UNIQUE_ID_COUNTER) = FIRST_OBJECT_ID;
+void beforeCreatingObjects(PlayLayer* pl) {
+    // A level left while it was making its objects, with the foreign counter on.
+    if (g_loading.foreign) g_foreignNext = idCounter();
+    idCounter() = FIRST_OBJECT_ID;
+    g_outOfOrder = false;
+    g_loading = {};
+    g_loading.layer = pl;
+    g_loading.on = true;
+    g_loading.batches = 1;
+}
+
+void beforeBatch(PlayLayer* pl) {
+    if (!loading(pl)) return;
+    levelCounterBack();
+    g_loading.batches++;
+}
+
+void afterBatch(PlayLayer* pl) {
+    // Not on: the game made its last objects in this batch (and went on to createObjectsFromSetupFinished).
+    if (!loading(pl) || g_loading.foreign || !g_foreignCounterOn) return;
+    g_loading.levelNext = idCounter();
+    idCounter() = g_foreignNext;
+    g_loading.foreign = true;
+}
+
+void objectsMade(PlayLayer* pl) {
+    if (!loading(pl)) return;
+    levelCounterBack();
+    g_loading.on = false;
+    if (g_loading.foreignMade > 0) {
+        log::info("Other mods made objects while the level made its own, in {} batches: {} unique IDs of their own "
+            "given to them", g_loading.batches, g_loading.foreignMade);
+    }
+}
+
+bool outOfOrder() {
+    return g_outOfOrder;
 }
 
 Loaded load(PlayLayer* pl) {
     Loaded out;
     g_level = {};
     g_openKey.clear();
+    g_outOfOrder = false;
     showHidden();
     auto plainKey = levelKey(pl);
     if (plainKey.empty()) return out;
@@ -1251,7 +1335,8 @@ Loaded load(PlayLayer* pl) {
     if (bad >= 0) {
         log::error("SPs of {} can't be saved: object {} has unique ID {}, expected {}", key, bad,
             static_cast<GameObject*>(pl->m_objects->objectAtIndex(bad))->m_uniqueID, FIRST_OBJECT_ID + bad);
-        out.notice = Notice::CantSave;
+        g_outOfOrder = true;
+        out.notice = Notice::OutOfOrder;
         return out;
     }
 

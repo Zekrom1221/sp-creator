@@ -37,6 +37,8 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"This level changed since you placed your SPs: they weren't loaded",
         "Уровень изменился после того, как ты ставил SP: они не загружены"},
     {"SPs can't be saved in this level", "В этом уровне SP не сохраняются"},
+    {"SPs are off in this level: another mod got in the way as it loaded\nYour saved SPs are fine, re-enter the level",
+        "SP в этом уровне выключены: другой мод помешал загрузке уровня\nСохранённые SP целы, перезайди в уровень"},
     {"SPs are off in this level: the old ones can't be moved aside",
         "SP в этом уровне выключены: не получилось убрать старые"},
     {"Your SPs", "Твои SP"},

@@ -1396,7 +1396,7 @@ void notifyLoaded(storage::Loaded const& loaded, size_t count) {
                     text::format(Msg::NotMoved, loaded.notMoved.size(), text::percents(loaded.notMoved))), warn);
             }
             break;
-        case Notice::CantSave: notify(warn, Msg::CantSave); break;
+        case Notice::OutOfOrder: notify(warn, Msg::OutOfOrder); break;
         case Notice::CantMoveAside: notify(warn, Msg::CantMoveAside); break;
         case Notice::SPsWithLowDetail: notify(warn, Msg::SPsWithLowDetail); break;
         case Notice::SPsWithoutLowDetail: notify(warn, Msg::SPsWithoutLowDetail); break;
@@ -1796,6 +1796,7 @@ class $modify(SPCBlanksOut, PlayLayer) {
     // Left some other way too (a new scene in its place). Not onExit: the game calls that to pause.
     void destructor() {
         storage::unhide(this);
+        storage::objectsMade(this);
         PlayLayer::~PlayLayer();
     }
 };
@@ -1815,12 +1816,26 @@ class $modify(SPCPlayLayer, PlayLayer) {
     void processCreateObjectsFromSetup() {
         if (!g_session.creatingObjects) {
             g_session.creatingObjects = true;
-            storage::beforeCreatingObjects();
+            storage::beforeCreatingObjects(this);
+        }
+        else {
+            // Between the batches, as other mods do (Globed).
+            smoke::betweenBatches(this);
+            storage::beforeBatch(this);
         }
         PlayLayer::processCreateObjectsFromSetup();
+        storage::afterBatch(this);
+    }
+
+    // Right in the batch that made the last objects, or in a frame of its own: the level's counter is back for
+    // what the game (and other mods) add after the level's objects, the anticheat spike first.
+    void createObjectsFromSetupFinished() {
+        storage::objectsMade(this);
+        PlayLayer::createObjectsFromSetupFinished();
     }
 
     void setupHasCompleted() {
+        storage::objectsMade(this);
         // The level has created its objects and picked its own startpos, if it has one. The SPs' objects,
         // added from here on, aren't hidden.
         g_session.levelShown = !g_session.hiding;
@@ -1886,6 +1901,8 @@ class $modify(SPCPlayLayer, PlayLayer) {
 
     void onQuit() {
         smoke::quitting();
+        // Left while the level was making its objects.
+        storage::objectsMade(this);
         saveUnsaved();
         storage::leave();
         // Checkpoints point into the level's objects: let go of them while the level still exists.

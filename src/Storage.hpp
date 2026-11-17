@@ -22,7 +22,7 @@ namespace storage {
         Loaded,         // `sps` loaded
         Failed,         // `failed` SPs couldn't be loaded
         LevelChanged,   // the SPs were made for another version of the level and set aside (`movedOver`)
-        CantSave,       // SPs of this level can't be saved
+        OutOfOrder,     // SPs are off in this level: its objects were out of order (outOfOrder())
         CantMoveAside,  // SPs of another version couldn't be set aside: SPs are off in this level
         // None here, but some placed with Low Detail Mode on / off, which only fit that mode.
         SPsWithLowDetail,
@@ -44,11 +44,23 @@ namespace storage {
 #ifdef SPC_SMOKE
     // Folder under the mod save dir (UTF-8, "levels"); the smoke test keeps its SPs apart.
     void setRoot(std::string_view utf8);
+    // Off: objects other mods make between the level's batches take IDs from the level's, as in 0.9.0.
+    void foreignCounter(bool on);
 #endif
     // Right before the level creates its objects (see Storage.cpp).
-    void beforeCreatingObjects();
+    void beforeCreatingObjects(PlayLayer* pl);
+    // A big level makes its objects over several frames, a batch a frame (PlayLayer::processCreateObjectsFromSetup):
+    // around each batch after the first, and once it has made them all (or is left, or goes), so that objects
+    // other mods make between the batches take no unique IDs from the level's (see Storage.cpp). Only for the
+    // level of beforeCreatingObjects(): one that goes after another has come in its place does nothing.
+    void beforeBatch(PlayLayer* pl);
+    void afterBatch(PlayLayer* pl);
+    void objectsMade(PlayLayer* pl);
     // Once the level has created its objects.
     Loaded load(PlayLayer* pl);
+    // load() found the level's objects out of order (another mod's objects took unique IDs among theirs): SPs are
+    // off in this level, the saved ones are as they were.
+    bool outOfOrder();
     // The x of each SP file in the level's folder, from the files' headers (nothing unpacked or checked further),
     // for the SPs' objects to be made before load(), which waits for the game's anticheat spike. Files load()
     // then sets aside (another level version) are in it too; SPs moved over from another version aren't.

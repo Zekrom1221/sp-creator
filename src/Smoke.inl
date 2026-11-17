@@ -138,6 +138,14 @@ struct SmokeTest {
     std::string handoffMode;
     std::vector<std::function<void()>> restores;  // settings changed by "setting", put back at the end
     int referenceLevel = 0;       // the level the reference run is of: other levels get blind jumps
+    // "foreign_players" (or "foreign:<n>" in a script, for the next level entered): as Globed with that many other
+    // players in the level, two player objects each, made between the level's first two batches of objects.
+    // "foreign_counter": false (or "foreign_counter:off"): they take IDs from the level's (storage::foreignCounter).
+    int foreignPlayers = 0;
+    // Of the level being entered (from 0 again once it's in, or left): frames between its batches, the player
+    // objects made in them. Not by the PlayLayer's address: the next one often gets the same.
+    int betweenBatches = 0;
+    int foreignMade = 0;
     // Blind jumps miss most portals: with "steer_portals" the player is put at a portal's height just before
     // it (outside auto parts), so every mode of the level comes up.
     bool steer = false;
@@ -344,6 +352,14 @@ void restoreSmokeUpdate() {
     log::info("Smoke test: update: the level is as it was");
 }
 
+// The mod's own counter for other mods' objects made between the level's batches of objects, on or off; on again
+// at the end.
+void smokeForeignCounter(bool on) {
+    storage::foreignCounter(on);
+    log::info("Smoke test: FOREIGN: the counter for other mods' objects while the level loads {}", on ? "on" : "off");
+    if (!on) g_smoke.restores.push_back([] { storage::foreignCounter(true); });
+}
+
 void startSmokeTest() {
     auto path = smokeTestPath("");
     std::error_code ec;
@@ -424,6 +440,8 @@ void startSmokeTest() {
     }
     g_smoke.scripted = !g_smoke.actions.empty();
     g_smoke.steer = root["steer_portals"].asBool().unwrapOr(false);
+    g_smoke.foreignPlayers = static_cast<int>(root["foreign_players"].asInt().unwrapOr(0));
+    if (!root["foreign_counter"].asBool().unwrapOr(true)) smokeForeignCounter(false);
     if (root.contains("update")) smokeUpdate(level, root["update"]);
     if (g_smoke.placeAtX.empty() && !g_smoke.scripted) g_smoke.stepsLeft = 60;
     log::info("Smoke test: level {} \"{}\" ({} stars), {} SPs to place, reference of {} rows, cleanup {}, Russian {}, {} steps, "
@@ -2261,6 +2279,15 @@ void nextAction() {
         t.dying = true;
         return next();
     }
+    if (op == "foreign") {
+        t.foreignPlayers = arg(0, 0);
+        log::info("Smoke test: FOREIGN: {} other players in the levels entered from here on", t.foreignPlayers);
+        return next();
+    }
+    if (op == "foreign_counter") {
+        smokeForeignCounter(rest != "off");
+        return next();
+    }
     if (op == "practice") {
         pl->togglePracticeMode(rest != "off");
         log::info("Smoke test: practice {}", pl->m_isPracticeMode);
@@ -2535,6 +2562,25 @@ void noticed(std::string const& text) {
     g_lastNotice = text;
 }
 
+// What Globed does with other players in the level as it loads: two player objects each, in the level's object
+// layer, made in a frame between its batches of objects.
+void betweenBatches(PlayLayer* pl) {
+    auto& t = g_smoke;
+    if (!t.active) return;
+    if (t.betweenBatches++ > 0 || t.foreignPlayers <= 0) return;
+    std::vector<int> ids;
+    for (int i = 0; i < t.foreignPlayers * 2; i++) {
+        auto player = PlayerObject::create(1, 1, pl, pl->m_objectLayer, false);
+        if (!player) continue;
+        player->setPosition({75.f + 30.f * i, 135.f});
+        pl->m_objectLayer->addChild(player);
+        ids.push_back(player->m_uniqueID);
+    }
+    t.foreignMade = static_cast<int>(ids.size());
+    log::info("Smoke test: FOREIGN: before batch 2 ({} level objects so far): {} player objects made, unique IDs {}",
+        pl->m_objects->count(), ids.size(), fmt::join(ids, ","));
+}
+
 void probeStep(PlayLayer* pl) {
     auto& p = g_stepProbe;
     if (p.left <= 0) return;
@@ -2649,6 +2695,10 @@ void loaded(PlayLayer* pl, storage::Loaded const& loaded) {
 void ready(PlayLayer* pl) {
     auto& t = g_smoke;
     if (!t.active) return;
+    log::info("Smoke test: FOREIGN: the level made its {} objects in {} batches, {} player objects of other mods made "
+        "meanwhile, its objects in order: {}, SPs saved: {}", pl->m_objects->count(), t.betweenBatches + 1, t.foreignMade,
+        !storage::outOfOrder(), storage::level().has_value());
+    t.betweenBatches = t.foreignMade = 0;
     if (t.scripted) {
         if (t.steer) {
             // Mode, gravity, size, dual, mirror, speed portals and teleports.
@@ -2727,6 +2777,7 @@ void died(PlayLayer* pl) {
 
 void quitting() {
     if (!g_smoke.active) return;
+    g_smoke.betweenBatches = g_smoke.foreignMade = 0;
     if (g_smoke.reentering) {
         log::info("Smoke test: out of the level, to enter one again");
         return;
