@@ -1,5 +1,6 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/ui/SliderNode.hpp>
 #include <Geode/utils/file.hpp>
 
 #include "Core.hpp"
@@ -667,6 +668,94 @@ public:
     }
 };
 
+std::string seconds(double value) {
+    return text::format(Msg::AutoPartSeconds, value);
+}
+
+// The auto part's length (its setting) from the SP list: a slider and -/+ in steps of 0.1 s, saved at once.
+class AutoPartPopup : public Popup {
+protected:
+    static constexpr float WIDTH = 300.f, HEIGHT = 190.f;
+    static constexpr double STEP = 0.1;
+
+    CCLabelBMFont* m_value = nullptr;
+    SliderNode* m_slider = nullptr;
+    geode::Function<void()> m_changed;
+
+    bool init(geode::Function<void()> changed) {
+        if (!Popup::init(WIDTH, HEIGHT)) return false;
+        m_changed = std::move(changed);
+        setGoldTitle(this, str(Msg::AutoPartTitle));
+        auto [lo, hi] = core::autoPartRange();
+        double now = core::autoPartSeconds();
+
+        m_value = text::label(seconds(now));
+        m_value->setScale(0.9f);
+        m_value->setID("auto-part-value"_spr);
+        m_mainLayer->addChildAtPosition(m_value, Anchor::Center, {0.f, 36.f});
+
+        m_slider = SliderNode::create([this](SliderNode*, float value) { this->set(value); });
+        m_slider->setMin(static_cast<float>(lo));
+        m_slider->setMax(static_cast<float>(hi));
+        m_slider->setSnapStep(static_cast<float>(STEP));
+        m_slider->setValue(static_cast<float>(now));
+        m_slider->setID("auto-part-slider"_spr);
+        m_mainLayer->addChildAtPosition(m_slider, Anchor::Center, {0.f, 4.f});
+        float half = m_slider->getContentWidth() / 2;
+
+        auto stepButton = [this](char const* sign, int dir) {
+            auto spr = CircleButtonSprite::create(CCLabelBMFont::create(sign, "bigFont.fnt"), CircleBaseColor::Green,
+                CircleBaseSize::Small);
+            spr->setScale(0.7f);
+            return CCMenuItemExt::createSpriteExtra(spr, [this, dir](auto) { this->set(core::autoPartSeconds() + dir * STEP); });
+        };
+        auto minus = stepButton("-", -1);
+        auto plus = stepButton("+", 1);
+        minus->setID("auto-part-minus"_spr);
+        plus->setID("auto-part-plus"_spr);
+        m_buttonMenu->addChildAtPosition(minus, Anchor::Center, {-half - 24.f, 4.f});
+        m_buttonMenu->addChildAtPosition(plus, Anchor::Center, {half + 24.f, 4.f});
+
+        for (auto [value, x] : {std::pair{lo, -half}, std::pair{hi, half}}) {
+            auto end = text::label(seconds(value));
+            end->setScale(0.35f);
+            end->setColor(NOTE_COLOR);
+            m_mainLayer->addChildAtPosition(end, Anchor::Center, {x, -14.f});
+        }
+
+        auto note = text::label(str(Msg::AutoPartNote));
+        note->setAlignment(kCCTextAlignmentCenter);
+        note->limitLabelWidth(WIDTH - 40.f, 0.4f, 0.1f);
+        note->setColor(NOTE_COLOR);
+        m_mainLayer->addChildAtPosition(note, Anchor::Bottom, {0.f, 34.f});
+        return true;
+    }
+
+    // Rounded to the step, within the setting's limits.
+    void set(double value) {
+        auto [lo, hi] = core::autoPartRange();
+        value = std::clamp(std::round(value / STEP) * STEP, lo, hi);
+        core::setAutoPartSeconds(value);
+        m_value->setString(seconds(value).c_str());
+        if (std::abs(m_slider->getValue() - value) > 1e-4) m_slider->setValue(static_cast<float>(value));
+        if (m_changed) m_changed();
+    }
+
+public:
+    CCLabelBMFont* titleLabel() { return m_title; }
+    using Popup::setTitle;
+
+    static AutoPartPopup* create(geode::Function<void()> changed) {
+        auto ret = new AutoPartPopup();
+        if (ret->init(std::move(changed))) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+};
+
 class SPListPopup : public Popup {
 protected:
     static constexpr float WIDTH = 380.f, HEIGHT = 290.f;
@@ -674,6 +763,7 @@ protected:
 
     PauseLayer* m_pause = nullptr;
     ScrollLayer* m_list = nullptr;
+    CCLabelBMFont* m_autoPart = nullptr;  // the auto part's length, by its button
     core::SP m_confirming;  // delete pressed once on this SP
     bool m_stale = false;   // to rebuild once on top
     bool m_built = false;   // rebuilt since: kept scrolled where it was
@@ -707,6 +797,23 @@ protected:
         m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(2.f));
         m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {-LIST_WIDTH / 2, 3.f - LIST_HEIGHT / 2});
 
+        // The auto part's length: a clock above the rows' right column (their play and delete buttons), as big as
+        // their play button, with the length by it.
+        float size = 28.f;
+        if (auto play = CCSprite::createWithSpriteFrameName("GJ_playBtn2_001.png")) size = play->getContentHeight() * 0.32f;
+        auto clock = CircleButtonSprite::createWithSpriteFrameName("GJ_timeIcon_001.png", 0.95f, CircleBaseColor::Green,
+            CircleBaseSize::Medium);
+        clock->setScale(size / clock->getContentHeight());
+        auto clockBtn = CCMenuItemExt::createSpriteExtra(clock, [this](auto) { this->onAutoPart(); });
+        clockBtn->setID("auto-part-button"_spr);
+        CCPoint at = {LIST_WIDTH / 2 - 6.f - size / 2, 3.f + LIST_HEIGHT / 2 + 5.f + size / 2};
+        m_buttonMenu->addChildAtPosition(clockBtn, Anchor::Center, at);
+        m_autoPart = text::label(seconds(core::autoPartSeconds()));
+        m_autoPart->setScale(0.5f);
+        m_autoPart->setAnchorPoint({1.f, 0.5f});
+        m_autoPart->setID("auto-part-label"_spr);
+        m_mainLayer->addChildAtPosition(m_autoPart, Anchor::Center, {at.x - size / 2 - 5.f, at.y});
+
         auto exportBtn = textButton(str(Msg::Export), [this](auto) { this->onExport(); });
         auto importBtn = textButton(str(Msg::Import), [this](auto) { this->onImport(); });
         auto versionsBtn = textButton(str(Msg::Versions), [this](auto) { this->onVersions(); });
@@ -730,6 +837,13 @@ protected:
         if (!storage::level()) return core::notify(NotificationIcon::Warning, str(storage::offMsg()));
         Ref<SPListPopup> self = this;
         if (auto popup = VersionsPopup::create([self] { self->refresh(); })) popup->show();
+    }
+
+    void onAutoPart() {
+        Ref<CCLabelBMFont> label = m_autoPart;
+        if (auto popup = AutoPartPopup::create([label] { label->setString(seconds(core::autoPartSeconds()).c_str()); })) {
+            popup->show();
+        }
     }
 
     void onExport() {

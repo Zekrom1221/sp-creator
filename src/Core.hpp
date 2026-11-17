@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 // What the SP list in the pause menu (SPList.cpp) and export / import (Transfer.cpp) use of the mod's
@@ -34,6 +35,12 @@ namespace core {
     // Deletes these SPs the same way, saved as a version first if `save` (storage::setAside).
     RemoveResult remove(std::vector<SP> const& sps, bool save);
     void rename(SP const& sp, std::string name);
+
+    // The auto part's length (its setting), in seconds: SPs placed from now on get it. Set within the setting's
+    // limits (autoPartRange), saved at once.
+    double autoPartSeconds();
+    std::pair<double, double> autoPartRange();
+    void setAutoPartSeconds(double seconds);
 
     // Changes with every level entered; 0 out of levels. Tells whether a file dialog came back to the
     // level it was opened in.

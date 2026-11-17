@@ -138,6 +138,10 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"Nothing to delete there", "Там нечего удалять"},
     {"{} KB", "{} КБ"},
     {"{:.1f} MB", "{:.1f} МБ"},
+    {"Auto part", "Авто-часть"},
+    {"{:.1f} s", "{:.1f} с"},
+    {"For SPs you place from now on.\nThose placed already stay as they are.",
+        "Для SP, которые поставишь дальше.\nУже поставленные не меняются."},
 }};
 // Entries left out would be null.
 static_assert(std::ranges::all_of(TEXTS, [](Entry const& e) { return e.en && e.ru; }), "a text is missing");

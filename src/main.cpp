@@ -1477,6 +1477,27 @@ void rename(SP const& sp, std::string name) {
     storage::saveNames(g_session.sps);
 }
 
+double autoPartSeconds() {
+    return ::autoPartSeconds();
+}
+
+std::pair<double, double> autoPartRange() {
+    double lo = 0.2, hi = 2.0;
+    if (auto setting = geode::cast::typeinfo_pointer_cast<FloatSettingV3>(Mod::get()->getSetting("auto-part-length"))) {
+        lo = setting->getMinValue().value_or(lo);
+        hi = setting->getMaxValue().value_or(hi);
+    }
+    return {lo, hi};
+}
+
+void setAutoPartSeconds(double seconds) {
+    auto [lo, hi] = autoPartRange();
+    seconds = std::clamp(seconds, lo, hi);
+    if (std::abs(seconds - Mod::get()->getSettingValue<double>("auto-part-length")) < 1e-6) return;
+    Mod::get()->setSettingValue<double>("auto-part-length", seconds);
+    log::info("Auto part length: {:.2f} s, from the SP list", seconds);
+}
+
 int session() {
     return PlayLayer::get() ? g_sessionCount : 0;
 }

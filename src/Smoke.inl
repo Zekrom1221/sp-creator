@@ -146,6 +146,7 @@ struct SmokeTest {
     // objects made in them. Not by the PlayLayer's address: the next one often gets the same.
     int betweenBatches = 0;
     int foreignMade = 0;
+    bool autoPartKept = false;  // the auto part's length as it was, put back at the end ("press")
     // Blind jumps miss most portals: with "steer_portals" the player is put at a portal's height just before
     // it (outside auto parts), so every mode of the level comes up.
     bool steer = false;
@@ -2191,6 +2192,18 @@ void nextAction() {
     if (op == "close_popup") {
         closeTopPopup();
         return afterFrames(20, nextAction);
+    }
+    // "press:<id>": a button of the mod's (its ID without the mod's prefix) or any other, by its node ID.
+    if (op == "press") {
+        // Buttons may change the auto part's length, the player's setting: as it was at the end.
+        if (!t.autoPartKept) {
+            t.autoPartKept = true;
+            double was = Mod::get()->getSettingValue<double>("auto-part-length");
+            t.restores.push_back([was] { Mod::get()->setSettingValue<double>("auto-part-length", was); });
+        }
+        pressButton(rest.find('/') == std::string::npos ? fmt::format("{}/{}", Mod::get()->getID(), rest) : rest);
+        log::info("Smoke test: auto part length now {:.2f} s", autoPartSeconds());
+        return afterFrames(10, nextAction);
     }
     // Where restarts go now, whether the game is paused, where the player and the camera are, the music.
     if (op == "state") {

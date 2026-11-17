@@ -130,6 +130,10 @@ namespace text {
         StorageNothing,
         Kilobytes,        // {size}
         Megabytes,        // {size}
+        // The auto part's length, from the SP list.
+        AutoPartTitle,
+        AutoPartSeconds,  // {seconds}
+        AutoPartNote,
         Count,
     };
 
