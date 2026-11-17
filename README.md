@@ -92,6 +92,9 @@ Only classic levels: platformer levels have no SPs.
   in a classic level these keys do nothing. So with Mega Hack's switcher on A and D, switching to an SP can hand
   you control at once, without the auto part. Until this is fixed, keep that setting on, or put the switcher on
   other keys, such as Q and E.
+- With **Globed**, when other players are in the level as it loads, the mod may say *SPs can't be saved in this
+  level*: your SPs don't load, and new ones aren't saved. Your saved SPs are not deleted. Until this is fixed,
+  enter the level again when nobody else is in it, or turn Globed off for the time being.
 
 ## Building
 
