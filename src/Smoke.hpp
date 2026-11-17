@@ -19,6 +19,7 @@ bool takesSnapshots();  // the mod's hidden checkpoints (a test turns them off t
 void noticed(std::string const& text);
 void betweenBatches(PlayLayer* pl);                           // the level makes its objects over several frames
 void beforeStep(PlayLayer* pl);                               // plays like a player would
+void afterAutoPartStep(PlayLayer* pl);                        // where a click the game queued comes in
 void loaded(PlayLayer* pl, storage::Loaded const& loaded);   // right after the level's SPs are read
 void ready(PlayLayer* pl);                                    // once they're in the level
 void restarted(PlayLayer* pl);
@@ -34,6 +35,7 @@ inline bool takesSnapshots() { return true; }
 inline void noticed(std::string const&) {}
 inline void betweenBatches(PlayLayer*) {}
 inline void beforeStep(PlayLayer*) {}
+inline void afterAutoPartStep(PlayLayer*) {}
 inline void loaded(PlayLayer*, storage::Loaded const&) {}
 inline void ready(PlayLayer*) {}
 inline void restarted(PlayLayer*) {}

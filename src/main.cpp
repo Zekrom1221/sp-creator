@@ -1610,6 +1610,7 @@ class $modify(SPCBaseLayer, GJBaseGameLayer) {
             // The smoke test plays like a player would: before the mod looks at the step.
             smoke::beforeStep(pl);
             if (g_play.sp) playStep(pl, g_stepUnit);
+            smoke::afterAutoPartStep(pl);
             recordStep(pl);
         }
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);

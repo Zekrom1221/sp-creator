@@ -93,6 +93,10 @@
             "default": 0.6,
             "min": 0.2,
             "max": 2.0,
+            "control": {
+                "arrow-step": 0.1,
+                "slider-step": 0.1
+            },
             "name": "Auto part length",
             "description": "Seconds the mod plays for you before handing over control. Applies to SPs placed after the change."
         },

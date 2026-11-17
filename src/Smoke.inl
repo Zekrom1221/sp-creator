@@ -147,6 +147,18 @@ struct SmokeTest {
     int betweenBatches = 0;
     int foreignMade = 0;
     bool autoPartKept = false;  // the auto part's length as it was, put back at the end ("press")
+    // "click:<offset>" (or "click:none") before "from"/"fromx": in the next attempt from an SP no blind jumps, and a
+    // click (jump held CLICK_STEPS steps) <offset> steps from the auto part's first jump press, ending the auto part
+    // whatever the setting; it comes in the step after the auto part's input, as a click the game queued (or Click
+    // Between Frames) does. The player's y and speed are logged each step near that jump (CLICK).
+    struct Click {
+        bool armed = false;
+        bool press = false;
+        int offset = 0;
+        int step = -1;     // of the attempt, from the restart
+        int jumpAt = -1;   // the auto part's first jump press
+        int fixedAt = -1;  // "click_at:<step>": that auto part step instead
+    } click;
     // Blind jumps miss most portals: with "steer_portals" the player is put at a portal's height just before
     // it (outside auto parts), so every mode of the level comes up.
     bool steer = false;
@@ -2292,6 +2304,32 @@ void nextAction() {
         t.dying = true;
         return next();
     }
+    // The auto part's length setting as Geode read it from mod.json: its arrows' and slider's steps.
+    if (op == "setting_steps") {
+        if (auto s = geode::cast::typeinfo_pointer_cast<FloatSettingV3>(Mod::get()->getSetting("auto-part-length"))) {
+            log::info("Smoke test: auto part length setting: arrows {} step {}, big arrows {}, slider {} step {}",
+                s->isArrowsEnabled(), s->getArrowStepSize(), s->isBigArrowsEnabled(), s->isSliderEnabled(), s->getSliderSnap());
+        }
+        return next();
+    }
+    if (op == "click_at") {
+        t.click = {};
+        t.click.armed = true;
+        t.click.press = args.size() < 2 || args[1] != "none";  // "click_at:<step>:none": only watched
+        t.click.fixedAt = arg(0, 0);
+        g_smokeTakeover = true;
+        log::info("Smoke test: CLICK at auto part step {} in the next attempt from an SP", t.click.fixedAt);
+        return next();
+    }
+    if (op == "click") {
+        t.click = {};
+        t.click.armed = true;
+        t.click.press = rest != "none";
+        t.click.offset = arg(0, 0);
+        g_smokeTakeover = true;
+        log::info("Smoke test: CLICK {} in the next attempt from an SP", t.click.press ? fmt::format("at {:+}", t.click.offset) : "none");
+        return next();
+    }
     if (op == "foreign") {
         t.foreignPlayers = arg(0, 0);
         log::info("Smoke test: FOREIGN: {} other players in the levels entered from here on", t.foreignPlayers);
@@ -2449,6 +2487,9 @@ void smokeStep(PlayLayer* pl) {
     if (t.dying) {
         // No input: the player crashes soon after the handoff.
     }
+    else if (t.click.armed) {
+        // Only the click (afterAutoPartStep).
+    }
     else if (!t.reference.empty() && pl->m_level->m_levelID.value() == t.referenceLevel) {
         // During the auto part the SP's own replay drives.
         if (!(g_play.sp && g_play.controlling)) followReference(pl);
@@ -2573,6 +2614,53 @@ bool takesSnapshots() {
 
 void noticed(std::string const& text) {
     g_lastNotice = text;
+}
+
+constexpr int CLICK_STEPS = 12;  // a quick click: 50 ms
+constexpr int CLICK_WATCH = 150;  // steps after the auto part's jump logged: past the landing
+
+// After the auto part's input of the step, before the game's physics: where a click the game queued comes in.
+void afterAutoPartStep(PlayLayer* pl) {
+    auto& c = g_smoke.click;
+    if (!g_smoke.active || !c.armed || c.step < 0) return;
+    int k = c.step++;
+    if (c.jumpAt < 0) {
+        if (!g_play.sp) {
+            log::warn("Smoke test: CLICK: the attempt isn't from an SP");
+            c.armed = false;
+            return;
+        }
+        for (auto const& in : g_play.sp->inputs) {
+            if (in.p1 && in.button == static_cast<int>(PlayerButton::Jump) && in.down) {
+                c.jumpAt = in.step;
+                break;
+            }
+        }
+        if (c.jumpAt < 0) {
+            log::warn("Smoke test: CLICK: no jump press in the auto part of SP {}", g_play.sp->id);
+            c.armed = false;
+            return;
+        }
+    }
+    int at = c.jumpAt + c.offset;
+    if (c.press && k == at) {
+        bool on = g_play.sp && g_play.controlling;
+        pl->handleButton(true, static_cast<int>(PlayerButton::Jump), true);
+        log::info("Smoke test: CLICK pressed at step {} (the auto part's jump at {}), auto part {} -> {}", k, c.jumpAt,
+            on ? "on" : "off", g_play.sp && g_play.controlling ? "on" : "off");
+    }
+    if (c.press && k == at + CLICK_STEPS) pl->handleButton(false, static_cast<int>(PlayerButton::Jump), true);
+    auto p = pl->m_player1;
+    if (k >= c.jumpAt - 3 && k <= std::max(c.jumpAt, at) + CLICK_WATCH) {
+        log::info("Smoke test: CLICK {} step {}: y {:.2f}, yVel {:.3f}, on ground {}, jump held {}, auto part {}",
+            c.fixedAt >= 0 ? fmt::format("@{}{}", c.fixedAt, c.press ? "" : "none") : c.press ? fmt::format("{:+}", c.offset) : std::string("none"),
+            k - c.jumpAt, p->m_position.y, p->m_yVelocity,
+            p->m_isOnGround, g_rec.holds[1] || g_play.gameHolds[1], g_play.sp && g_play.controlling ? "on" : "off");
+    }
+    else if (k > std::max(c.jumpAt, at) + CLICK_WATCH) {
+        c.armed = false;
+        g_smokeTakeover = false;
+    }
 }
 
 // What Globed does with other players in the level as it loads: two player objects each, in the level's object
@@ -2741,6 +2829,10 @@ void ready(PlayLayer* pl) {
 
 void restarted(PlayLayer* pl) {
     if (g_smoke.active) g_smoke.refIndex = -1;  // the bot finds its place in the run again
+    if (g_smoke.click.armed) {
+        g_smoke.click.step = 0;
+        g_smoke.click.jumpAt = g_smoke.click.fixedAt;
+    }
     if (g_smoke.externalOn || g_smoke.logRestarts) logRestart(pl, "restart");
     if (g_smoke.meddle && g_play.sp) {
         auto p = pl->m_player1;
