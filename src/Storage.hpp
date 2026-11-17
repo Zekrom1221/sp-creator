@@ -1,6 +1,7 @@
 #pragma once
 
 #include "StartPoint.hpp"
+#include "Text.hpp"
 
 #include <ctime>
 #include <filesystem>
@@ -22,7 +23,7 @@ namespace storage {
         Loaded,         // `sps` loaded
         Failed,         // `failed` SPs couldn't be loaded
         LevelChanged,   // the SPs were made for another version of the level and set aside (`movedOver`)
-        OutOfOrder,     // SPs are off in this level: its objects were out of order (outOfOrder())
+        OutOfOrder,     // SPs are off in this level: its objects were out of order
         CantMoveAside,  // SPs of another version couldn't be set aside: SPs are off in this level
         // None here, but some placed with Low Detail Mode on / off, which only fit that mode.
         SPsWithLowDetail,
@@ -58,9 +59,9 @@ namespace storage {
     void objectsMade(PlayLayer* pl);
     // Once the level has created its objects.
     Loaded load(PlayLayer* pl);
-    // load() found the level's objects out of order (another mod's objects took unique IDs among theirs): SPs are
-    // off in this level, the saved ones are as they were.
-    bool outOfOrder();
+    // Why SPs are off in the open level (level() is empty), for the player: OutOfOrder (another mod's objects took
+    // unique IDs among the level's), CantMoveAside, or CantSave for the rest. The saved SPs are as they were.
+    text::Msg offMsg();
     // The x of each SP file in the level's folder, from the files' headers (nothing unpacked or checked further),
     // for the SPs' objects to be made before load(), which waits for the game's anticheat spike. Files load()
     // then sets aside (another level version) are in it too; SPs moved over from another version aren't.

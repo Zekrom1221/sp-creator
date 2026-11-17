@@ -89,7 +89,7 @@ struct Level {
 
 // The open level's folder name, set before load() can give up on it (its SPs not loaded, nor saved).
 std::string g_openKey;
-bool g_outOfOrder = false;  // load() gave up on the level: its objects were out of order
+storage::Notice g_offBecause = storage::Notice::None;  // what load() gave up on the level with (offMsg())
 
 // While a big level makes its objects, a batch a frame, other mods make objects of their own in between: Globed
 // makes two players for every other player in the level. With the game's counter, those would take unique IDs
@@ -1279,7 +1279,7 @@ void beforeCreatingObjects(PlayLayer* pl) {
     // A level left while it was making its objects, with the foreign counter on.
     if (g_loading.foreign) g_foreignNext = idCounter();
     idCounter() = FIRST_OBJECT_ID;
-    g_outOfOrder = false;
+    g_offBecause = Notice::None;
     g_loading = {};
     g_loading.layer = pl;
     g_loading.on = true;
@@ -1310,15 +1310,19 @@ void objectsMade(PlayLayer* pl) {
     }
 }
 
-bool outOfOrder() {
-    return g_outOfOrder;
+text::Msg offMsg() {
+    switch (g_offBecause) {
+        case Notice::OutOfOrder: return text::Msg::OutOfOrder;
+        case Notice::CantMoveAside: return text::Msg::CantMoveAside;
+        default: return text::Msg::CantSave;
+    }
 }
 
 Loaded load(PlayLayer* pl) {
     Loaded out;
     g_level = {};
     g_openKey.clear();
-    g_outOfOrder = false;
+    g_offBecause = Notice::None;
     showHidden();
     auto plainKey = levelKey(pl);
     if (plainKey.empty()) return out;
@@ -1335,8 +1339,7 @@ Loaded load(PlayLayer* pl) {
     if (bad >= 0) {
         log::error("SPs of {} can't be saved: object {} has unique ID {}, expected {}", key, bad,
             static_cast<GameObject*>(pl->m_objects->objectAtIndex(bad))->m_uniqueID, FIRST_OBJECT_ID + bad);
-        g_outOfOrder = true;
-        out.notice = Notice::OutOfOrder;
+        out.notice = g_offBecause = Notice::OutOfOrder;
         return out;
     }
 
@@ -1344,7 +1347,7 @@ Loaded load(PlayLayer* pl) {
     auto dir = root / key;
     auto info = identity(pl);
     if (!moveLowDetailSPs(pl, root, plainKey, info)) {
-        out.notice = Notice::CantMoveAside;
+        out.notice = g_offBecause = Notice::CantMoveAside;
         return out;
     }
     auto infoPath = dir / "level.json";
@@ -1372,7 +1375,7 @@ Loaded load(PlayLayer* pl) {
                 ec ? ec.message() : "ok");
             if (ec) {
                 // Loading them would put them into the wrong version, saving would mix the two.
-                out.notice = Notice::CantMoveAside;
+                out.notice = g_offBecause = Notice::CantMoveAside;
                 return out;
             }
             out.notice = Notice::LevelChanged;

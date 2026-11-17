@@ -1196,6 +1196,11 @@ bool canSwitchPaused(PlayLayer* pl) {
 bool placeSP() {
     auto pl = PlayLayer::get();
     if (!canUseKeys(pl) || pl->m_player1->m_isDead) return false;
+    // It would be gone once the level is left, though it said it was placed.
+    if (!storage::level()) {
+        notify(NotificationIcon::Warning, storage::offMsg());
+        return true;
+    }
     if (g_play.sp && g_play.controlling) {
         notify(NotificationIcon::Warning, Msg::WaitAutoPart);
         return true;

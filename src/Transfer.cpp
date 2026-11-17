@@ -46,11 +46,6 @@ auto fail(Msg msg) {
     return Err(std::string(text::tr(msg)));
 }
 
-// Why SPs are off in the open level (storage::level() is empty), for the player.
-Msg offInLevel() {
-    return storage::outOfOrder() ? Msg::OutOfOrder : Msg::CantSave;
-}
-
 // matjson parses nested arrays and objects by recursion, with no limit: a pack.json nested deep enough
 // would overflow the stack, which nothing can catch.
 bool shallow(std::string_view json) {
@@ -293,7 +288,7 @@ Result<Raw> split(ByteSpan bytes) {
 Result<ByteVector> pack(std::vector<core::SP> const& sps, int& packed) {
     packed = 0;
     auto level = storage::level();
-    if (!level) return fail(offInLevel());
+    if (!level) return fail(storage::offMsg());
     core::saveAll();
     Raw raw;
     auto entries = matjson::Value::array();
@@ -320,7 +315,7 @@ Result<ByteVector> pack(std::vector<core::SP> const& sps, int& packed) {
 
 Result<Pack> open(std::filesystem::path const& path) {
     auto level = storage::level();
-    if (!level) return fail(offInLevel());
+    if (!level) return fail(storage::offMsg());
     std::error_code ec;
     auto size = std::filesystem::file_size(path, ec);
     if (ec) {

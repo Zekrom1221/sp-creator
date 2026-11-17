@@ -2697,7 +2697,7 @@ void ready(PlayLayer* pl) {
     if (!t.active) return;
     log::info("Smoke test: FOREIGN: the level made its {} objects in {} batches, {} player objects of other mods made "
         "meanwhile, its objects in order: {}, SPs saved: {}", pl->m_objects->count(), t.betweenBatches + 1, t.foreignMade,
-        !storage::outOfOrder(), storage::level().has_value());
+        storage::offMsg() != Msg::OutOfOrder, storage::level().has_value());
     t.betweenBatches = t.foreignMade = 0;
     if (t.scripted) {
         if (t.steer) {

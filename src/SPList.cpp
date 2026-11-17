@@ -32,11 +32,6 @@ void scrollBack(ScrollLayer* list, float down) {
     content->setPositionY(std::clamp(top + down, top, 0.f));
 }
 
-// Why SPs are off in the open level (storage::level() is empty), for the player.
-Msg offInLevel() {
-    return storage::outOfOrder() ? Msg::OutOfOrder : Msg::CantSave;
-}
-
 // "SP 3 (45.2%)", or "3. Name (45.2%)".
 std::string caption(std::string const& name, size_t number, float percent) {
     if (name.empty()) return fmt::format("SP {} ({:.1f}%)", number, percent);
@@ -732,21 +727,21 @@ protected:
     }
 
     void onVersions() {
-        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(offInLevel()));
+        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(storage::offMsg()));
         Ref<SPListPopup> self = this;
         if (auto popup = VersionsPopup::create([self] { self->refresh(); })) popup->show();
     }
 
     void onExport() {
         if (core::sps().empty()) return core::notify(NotificationIcon::Warning, str(Msg::NoSPs));
-        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(offInLevel()));
+        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(storage::offMsg()));
         if (auto popup = ExportPopup::create()) popup->show();
     }
 
     // Several at once: picked in a list of their own.
     void onDeleteSome() {
         if (core::sps().empty()) return core::notify(NotificationIcon::Warning, str(Msg::NoSPs));
-        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(offInLevel()));
+        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(storage::offMsg()));
         this->stopActionByTag(1);
         m_confirming = nullptr;
         this->refresh();
@@ -755,7 +750,7 @@ protected:
     }
 
     void onImport() {
-        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(offInLevel()));
+        if (!storage::level()) return core::notify(NotificationIcon::Warning, str(storage::offMsg()));
         int session = core::session();
         Ref<SPListPopup> self = this;
         transfer::chooseFile(false, "", [self, session](std::optional<std::filesystem::path> path) {
