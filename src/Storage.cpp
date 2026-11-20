@@ -1314,6 +1314,7 @@ text::Msg offMsg() {
     switch (g_offBecause) {
         case Notice::OutOfOrder: return text::Msg::OutOfOrder;
         case Notice::CantMoveAside: return text::Msg::CantMoveAside;
+        case Notice::CantMoveLowDetail: return text::Msg::CantMoveLowDetail;
         default: return text::Msg::CantSave;
     }
 }
@@ -1347,7 +1348,7 @@ Loaded load(PlayLayer* pl) {
     auto dir = root / key;
     auto info = identity(pl);
     if (!moveLowDetailSPs(pl, root, plainKey, info)) {
-        out.notice = g_offBecause = Notice::CantMoveAside;
+        out.notice = g_offBecause = Notice::CantMoveLowDetail;
         return out;
     }
     auto infoPath = dir / "level.json";

@@ -147,6 +147,8 @@ struct SmokeTest {
     int betweenBatches = 0;
     int foreignMade = 0;
     bool autoPartKept = false;  // the auto part's length as it was, put back at the end ("press")
+    int barLeft = 0;
+    int barSteps = 0;  // "bar:<steps>": the game's progress bar and percent logged at restarts and these steps after (BAR)
     // "click:<offset>" (or "click:none") before "from"/"fromx": in the next attempt from an SP no blind jumps, and a
     // click (jump held CLICK_STEPS steps) <offset> steps from the auto part's first jump press, ending the auto part
     // whatever the setting; it comes in the step after the auto part's input, as a click the game queued (or Click
@@ -2305,6 +2307,24 @@ void nextAction() {
         return next();
     }
     // The auto part's length setting as Geode read it from mod.json: its arrows' and slider's steps.
+    // Each SP's percent: as placed (the game's then), as the mod gives it for its object at a restart (startPosPercent,
+    // Blitzkrieg's way), and by x; with the level's length and time.
+    if (op == "percents") {
+        float length = pl->m_levelLength;
+        float time = pl->timeForPos({length, 0.f}, 0, 0, true, 0);
+        log::info("Smoke test: PERCENTS level length {:.1f}, its time {:.3f}, timestamp {}, by time {}", length, time,
+            pl->m_level->m_timestamp, pl->m_level->m_timestamp > 0);
+        for (auto const& sp : sps) {
+            float x = sp->object ? sp->object->getPositionX() : sp->x;
+            log::info("Smoke test: PERCENTS SP {} x {:.1f}: placed {:.2f}%, at a restart {:.2f}%, by x {:.2f}%, time {:.3f}", sp->id, x,
+                sp->percent, startPosPercent(pl, x), length > 0 ? x / length * 100.f : 0.f, pl->timeForPos({x, 0.f}, 0, 0, true, 0));
+        }
+        return next();
+    }
+    if (op == "bar") {
+        t.barSteps = arg(0, 10);
+        return next();
+    }
     if (op == "setting_steps") {
         if (auto s = geode::cast::typeinfo_pointer_cast<FloatSettingV3>(Mod::get()->getSetting("auto-part-length"))) {
             log::info("Smoke test: auto part length setting: arrows {} step {}, big arrows {}, slider {} step {}",
@@ -2620,7 +2640,13 @@ constexpr int CLICK_STEPS = 12;  // a quick click: 50 ms
 constexpr int CLICK_WATCH = 150;  // steps after the auto part's jump logged: past the landing
 
 // After the auto part's input of the step, before the game's physics: where a click the game queued comes in.
+void logBar(PlayLayer* pl, std::string_view when);
+
 void afterAutoPartStep(PlayLayer* pl) {
+    if (g_smoke.active && g_smoke.barLeft > 0) {
+        logBar(pl, fmt::format("before step {}", g_smoke.barSteps - g_smoke.barLeft));
+        g_smoke.barLeft--;
+    }
     auto& c = g_smoke.click;
     if (!g_smoke.active || !c.armed || c.step < 0) return;
     int k = c.step++;
@@ -2827,7 +2853,17 @@ void ready(PlayLayer* pl) {
     if (t.quit) pl->runAction(CCSequence::create(CCDelayTime::create(1.f), CallFuncExt::create([] { smokeQuit(); }), nullptr));
 }
 
+void logBar(PlayLayer* pl, std::string_view when) {
+    log::info("Smoke test: BAR {}: label \"{}\", bar scale {:.4f}, percent {:.2f}, player x {:.1f}, level time {:.4f}", when,
+        pl->m_percentageLabel ? pl->m_percentageLabel->getString() : "-", pl->m_progressBar ? pl->m_progressBar->getScaleX() : -1.f,
+        pl->getCurrentPercent(), pl->m_player1->m_position.x, pl->m_gameState.m_levelTime);
+}
+
 void restarted(PlayLayer* pl) {
+    if (g_smoke.barSteps > 0) {
+        logBar(pl, "restart");
+        g_smoke.barLeft = g_smoke.barSteps;
+    }
     if (g_smoke.active) g_smoke.refIndex = -1;  // the bot finds its place in the run again
     if (g_smoke.click.armed) {
         g_smoke.click.step = 0;

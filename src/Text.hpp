@@ -30,6 +30,7 @@ namespace text {
         CantSave,
         OutOfOrder,
         CantMoveAside,
+        CantMoveLowDetail,
         ListTitle,
         ListEmpty,        // {key}
         ListLevelStart,

@@ -25,6 +25,7 @@ namespace storage {
         LevelChanged,   // the SPs were made for another version of the level and set aside (`movedOver`)
         OutOfOrder,     // SPs are off in this level: its objects were out of order
         CantMoveAside,  // SPs of another version couldn't be set aside: SPs are off in this level
+        CantMoveLowDetail,  // SPs placed with Low Detail Mode couldn't go to its folder: SPs are off in this level
         // None here, but some placed with Low Detail Mode on / off, which only fit that mode.
         SPsWithLowDetail,
         SPsWithoutLowDetail,
@@ -60,7 +61,7 @@ namespace storage {
     // Once the level has created its objects.
     Loaded load(PlayLayer* pl);
     // Why SPs are off in the open level (level() is empty), for the player: OutOfOrder (another mod's objects took
-    // unique IDs among the level's), CantMoveAside, or CantSave for the rest. The saved SPs are as they were.
+    // unique IDs among the level's), CantMoveAside, CantMoveLowDetail, or CantSave for the rest. The saved SPs are as they were.
     text::Msg offMsg();
     // The x of each SP file in the level's folder, from the files' headers (nothing unpacked or checked further),
     // for the SPs' objects to be made before load(), which waits for the game's anticheat spike. Files load()

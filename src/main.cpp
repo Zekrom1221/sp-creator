@@ -158,6 +158,7 @@ struct Session {
 };
 
 Session g_session;
+bool g_gameShowsPercent = false;  // in the game's PlayLayer::updateProgressbar (SPCPlayLayer::getCurrentPercent)
 int g_sessionCount = 0;  // levels entered
 // The step being played: what the game passed to processCommands, and its time in steps.
 float g_stepDt = 0;
@@ -1403,6 +1404,7 @@ void notifyLoaded(storage::Loaded const& loaded, size_t count) {
             break;
         case Notice::OutOfOrder: notify(warn, Msg::OutOfOrder); break;
         case Notice::CantMoveAside: notify(warn, Msg::CantMoveAside); break;
+        case Notice::CantMoveLowDetail: notify(warn, Msg::CantMoveLowDetail); break;
         case Notice::SPsWithLowDetail: notify(warn, Msg::SPsWithLowDetail); break;
         case Notice::SPsWithoutLowDetail: notify(warn, Msg::SPsWithoutLowDetail); break;
     }
@@ -1919,11 +1921,22 @@ class $modify(SPCPlayLayer, PlayLayer) {
         // An attempt from an SP starts at its spawn, an auto part before the SP. Until its first step, mods
         // that note where an attempt starts (Blitzkrieg, in resetLevel) get the percent of the SP's object,
         // as they count it: otherwise the attempt would also touch the stretch before the SP.
+        // Not the game's own progress bar and percent: they show where the player is, as the game counts it.
+        if (g_gameShowsPercent) return PlayLayer::getCurrentPercent();
         auto sp = g_session.spawning;
         if (!sp && g_play.sp && g_play.controlling && g_play.step == 0) sp = g_play.sp;
         // From where the object stands, not where it is: the restart may have moved it (see placeObjects).
         if (sp && sp->object && m_checkpointArray->count() == 0) return startPosPercent(this, objectPosition(*sp).x);
         return PlayLayer::getCurrentPercent();
+    }
+
+    // In levels whose percent goes by time the game counts it by the level's time, which an SP's object hasn't, and
+    // Blitzkrieg by the time to the level's last object: where that stands far past the end the two differ a lot
+    // (Fiberglass: the game 94% at the spawn, Blitzkrieg 68% for the SP). The game's bar and label keep the game's.
+    void updateProgressbar() {
+        g_gameShowsPercent = true;
+        PlayLayer::updateProgressbar();
+        g_gameShowsPercent = false;
     }
 
     void onQuit() {
