@@ -488,7 +488,9 @@ void logRestart(PlayLayer* pl, std::string_view what) {
         activeLabel(), sp ? fmt::format("of SP {}", sp->id) : (pl->m_startPosObject ? "of the level" : "none"),
         g_session.active && pl->m_currentCheckpoint == g_session.active->cp ? "loaded" : "not loaded",
         g_play.sp ? fmt::format("of SP {}", g_play.sp->id) : "none", pl->m_isTestMode, pl->getCurrentPercent(),
-        sp ? fmt::format(" (its object's {:.3f})", startPosPercent(pl, sp->object->getPositionX())) : "");
+        sp ? fmt::format(" (the SP's {:.3f}, by the level's time {:.3f})", sp->percent, startPosPercent(pl, objectPosition(*sp).x))
+            : pl->m_startPosObject ? fmt::format(" (by the level's time {:.3f})", startPosPercent(pl, pl->m_startPosObject->getPositionX()))
+            : "");
 }
 
 // Startpos switchers' "3/5" labels on screen (MegaHack's, at the bottom), and the SPs' objects: the
@@ -2307,18 +2309,42 @@ void nextAction() {
         return next();
     }
     // The auto part's length setting as Geode read it from mod.json: its arrows' and slider's steps.
-    // Each SP's percent: as placed (the game's then), as the mod gives it for its object at a restart (startPosPercent,
-    // Blitzkrieg's way), and by x; with the level's length and time.
+    // Each SP's percent: as placed (the game's then, what other mods get at a restart), by the level's time at its x
+    // (startPosPercent, the switcher's for the level's startposes), Blitzkrieg's stage for it (by the time to the
+    // level's last object), and by x.
     if (op == "percents") {
         float length = pl->m_levelLength;
         float time = pl->timeForPos({length, 0.f}, 0, 0, true, 0);
-        log::info("Smoke test: PERCENTS level length {:.1f}, its time {:.3f}, timestamp {}, by time {}", length, time,
-            pl->m_level->m_timestamp, pl->m_level->m_timestamp > 0);
+        log::info("Smoke test: PERCENTS level length {:.1f}, its time {:.3f}, timestamp {} ({:.3f} s), by time {}", length, time,
+            pl->m_level->m_timestamp, pl->m_level->m_timestamp / 240.f, pl->m_level->m_timestamp > 0);
         for (auto const& sp : sps) {
-            float x = sp->object ? sp->object->getPositionX() : sp->x;
-            log::info("Smoke test: PERCENTS SP {} x {:.1f}: placed {:.2f}%, at a restart {:.2f}%, by x {:.2f}%, time {:.3f}", sp->id, x,
-                sp->percent, startPosPercent(pl, x), length > 0 ? x / length * 100.f : 0.f, pl->timeForPos({x, 0.f}, 0, 0, true, 0));
+            float x = objectPosition(*sp).x;
+            float at = pl->timeForPos({x, 0.f}, 0, 0, true, 0);
+            log::info("Smoke test: PERCENTS SP {} x {:.1f}: placed {:.2f}%, by the level's time {:.2f}%, Blitzkrieg {:.2f}%, by x {:.2f}%, "
+                "time {:.3f}", sp->id, x, sp->percent, startPosPercent(pl, x), time > 0 ? at / time * 100.f : 0.f,
+                length > 0 ? x / length * 100.f : 0.f, at);
         }
+        for (auto const& l : g_session.levelStartPoses) {
+            log::info("Smoke test: PERCENTS the level's startpos x {:.1f}: {:.2f}%", l.x, l.percent);
+        }
+        return next();
+    }
+    // Labels with a percent on screen (Mega Hack's best run among them), and the game's percent now against the
+    // mod's way of counting it (startPosPercent) at the player's x.
+    if (op == "labels") {
+        std::vector<std::string> found;
+        std::function<void(CCNode*)> walk = [&](CCNode* node) {
+            if (auto label = typeinfo_cast<CCLabelBMFont*>(node)) {
+                std::string_view s = label->getString() ? label->getString() : "";
+                if (s.find('%') != std::string_view::npos) found.push_back(fmt::format("\"{}\"{}", s, label->isVisible() ? "" : " (hidden)"));
+            }
+            if (!node->getChildren()) return;
+            for (auto child : CCArrayExt<CCNode*>(node->getChildren())) walk(child);
+        };
+        if (auto scene = CCDirector::get()->getRunningScene()) walk(scene);
+        float x = pl->m_player1->m_position.x;
+        log::info("Smoke test: LABELS {}: [{}]; the game's percent {:.3f}, the mod's way at x {:.1f}: {:.3f}, level time {:.4f}",
+            rest, fmt::join(found, ", "), pl->getCurrentPercent(), x, startPosPercent(pl, x), pl->m_gameState.m_levelTime);
         return next();
     }
     if (op == "bar") {

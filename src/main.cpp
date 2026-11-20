@@ -823,13 +823,14 @@ void startPlayback(PlayLayer* pl) {
         pl->m_isPracticeMode, pl->m_isTestMode, pl->m_level->m_attempts.value(), pl->m_level->m_normalPercent.value());
 }
 
-// The percent another mod computes for a startpos at x (Blitzkrieg's stages): by position, or by time
-// in levels whose percent goes by time.
+// Where a startpos at x is (the level's own, in the switcher), as the game counts the percent in a run from the
+// start: by position, or in levels whose percent goes by time, by the level's time there against its timestamp (the
+// time to the end, in steps of 1/240 s). Not against the time to the level's last object, which can stand far past
+// the end (Fiberglass: 68% for 95%).
 float startPosPercent(PlayLayer* pl, float x) {
     float percent;
     if (pl->m_level->m_timestamp > 0) {
-        float length = pl->timeForPos({pl->m_levelLength, 0.f}, 0, 0, true, 0);
-        percent = length > 0 ? pl->timeForPos({x, 0.f}, 0, 0, true, 0) / length * 100.f : 0.f;
+        percent = pl->timeForPos({x, 0.f}, 0, 0, true, 0) * 240.f / pl->m_level->m_timestamp * 100.f;
     }
     else {
         percent = pl->m_levelLength > 0 ? x / pl->m_levelLength * 100.f : 0.f;
@@ -1919,20 +1920,19 @@ class $modify(SPCPlayLayer, PlayLayer) {
 
     float getCurrentPercent() {
         // An attempt from an SP starts at its spawn, an auto part before the SP. Until its first step, mods
-        // that note where an attempt starts (Blitzkrieg, in resetLevel) get the percent of the SP's object,
-        // as they count it: otherwise the attempt would also touch the stretch before the SP.
-        // Not the game's own progress bar and percent: they show where the player is, as the game counts it.
+        // that note where an attempt starts (Blitzkrieg, Mega Hack's best run, in resetLevel) get the SP's percent:
+        // the game's where the SP was placed, which the game gives again there in the attempt (it goes on from the
+        // SP's checkpoint). Not one counted from x: in levels that go back and forth that's somewhere else.
+        // Not the game's own progress bar and percent: they show where the player is, the spawn.
         if (g_gameShowsPercent) return PlayLayer::getCurrentPercent();
         auto sp = g_session.spawning;
         if (!sp && g_play.sp && g_play.controlling && g_play.step == 0) sp = g_play.sp;
-        // From where the object stands, not where it is: the restart may have moved it (see placeObjects).
-        if (sp && sp->object && m_checkpointArray->count() == 0) return startPosPercent(this, objectPosition(*sp).x);
+        if (sp && sp->object && m_checkpointArray->count() == 0) return sp->percent;
         return PlayLayer::getCurrentPercent();
     }
 
-    // In levels whose percent goes by time the game counts it by the level's time, which an SP's object hasn't, and
-    // Blitzkrieg by the time to the level's last object: where that stands far past the end the two differ a lot
-    // (Fiberglass: the game 94% at the spawn, Blitzkrieg 68% for the SP). The game's bar and label keep the game's.
+    // The game's bar and label at a restart from an SP: where the player is, a bit before the SP (Fiberglass: 94%
+    // at the spawn of an SP at 95.5%), not the SP's percent that other mods get (getCurrentPercent).
     void updateProgressbar() {
         g_gameShowsPercent = true;
         PlayLayer::updateProgressbar();
