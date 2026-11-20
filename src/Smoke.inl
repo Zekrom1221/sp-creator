@@ -2285,6 +2285,21 @@ void nextAction() {
         return next();
     }
     // A startpos of the level in the switcher (by x) disabled, as its Disable checkbox does.
+    // A restart from the level's own startpos i (by x), the way a switcher makes one.
+    if (op == "level_from") {
+        size_t i = static_cast<size_t>(arg(0, 0));
+        auto const& level = g_session.levelStartPoses;
+        if (i >= level.size()) {
+            log::error("Smoke test: no startpos {} of the level", i);
+            return next();
+        }
+        pl->m_isTestMode = true;
+        setCurrentCheckpoint(pl, nullptr);
+        pl->setStartPosObject(level[i].object);
+        pl->resetLevel();
+        logRestart(pl, fmt::format("the level's startpos {} at x {:.0f}", i, level[i].x));
+        return next();
+    }
     if (op == "disable_startpos") {
         size_t i = static_cast<size_t>(arg(0, 0));
         auto const& level = g_session.levelStartPoses;
