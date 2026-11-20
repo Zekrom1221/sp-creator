@@ -2340,7 +2340,9 @@ void nextAction() {
                 length > 0 ? x / length * 100.f : 0.f, at);
         }
         for (auto const& l : g_session.levelStartPoses) {
-            log::info("Smoke test: PERCENTS the level's startpos x {:.1f}: {:.2f}%", l.x, l.percent);
+            float at = pl->timeForPos({l.x, 0.f}, 0, 0, true, 0);
+            log::info("Smoke test: PERCENTS the level's startpos x {:.1f}: {:.2f}%, Blitzkrieg {:.2f}%, by x {:.2f}%, time {:.3f}",
+                l.x, l.percent, time > 0 ? at / time * 100.f : 0.f, length > 0 ? l.x / length * 100.f : 0.f, at);
         }
         return next();
     }
