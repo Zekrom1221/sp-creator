@@ -11,5 +11,7 @@ set PATH=%LOCALAPPDATA%\Microsoft\WinGet\Packages\GeodeSDK.GeodeCLI_Microsoft.Wi
 cd /d "%~dp0"
 rem Eclipse Menu's API headers, if it's installed: the smoke test sets its options.
 set ECLIPSE_API=C:\Program Files (x86)\Steam\steamapps\common\Geometry Dash\geode\unzipped\eclipse.eclipse-menu
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSPC_SMOKE=%SMOKE% "-DSPC_ECLIPSE_API=%ECLIPSE_API%" || exit /b 1
+rem Codegen is built from the bindings clone (GEODE_BINDINGS_REPO_PATH): the downloaded one is a rolling "latest"
+rem and now writes headers for Geode 6.
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSKIP_BUILDING_CODEGEN=OFF -DSPC_SMOKE=%SMOKE% "-DSPC_ECLIPSE_API=%ECLIPSE_API%" || exit /b 1
 cmake --build build || exit /b 1
