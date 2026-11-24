@@ -11,6 +11,8 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
 #include <Geode/cocos/support/zip_support/ZipUtils.h>
+#include <Geode/cocos/kazmath/include/kazmath/GL/matrix.h>
+#include <Geode/cocos/touch_dispatcher/CCTouchHandler.h>
 #include <Geode/utils/file.hpp>
 
 #include "Disk.hpp"
@@ -882,20 +884,31 @@ struct StepProbe {
     std::chrono::steady_clock::time_point at;
 } g_stepProbe;
 
+void logListsFit(std::string const& when);
+
 // What's on screen, overlays (notifications) included, as <mod save dir>/<name>.
 void captureScreen(std::string const& name) {
     auto director = CCDirector::get();
     auto size = director->getWinSize();
-    auto rt = CCRenderTexture::create(static_cast<int>(size.width), static_cast<int>(size.height));
+    // With a stencil buffer: lists are cut to their size by a clipping node, which draws its stencil without one.
+    auto rt = CCRenderTexture::create(static_cast<int>(size.width), static_cast<int>(size.height), kCCTexture2DPixelFormat_RGBA8888,
+        0x88F0 /* GL_DEPTH24_STENCIL8 */);
+    // The texture has the content scale's pixels per point, the game draws into it with the window's: scaled down by
+    // their ratio, the whole screen fits it (from its bottom left corner).
+    float fit = director->getContentScaleFactor() / CCEGLView::get()->getScaleX();
     rt->begin();
+    kmGLPushMatrix();
+    kmGLScalef(fit, fit, 1.f);
     director->getRunningScene()->visit();
     OverlayManager::get()->visit();
+    kmGLPopMatrix();
     rt->end();
     auto image = rt->newCCImage(true);
     auto path = disk::saveDir() / name;
     bool ok = image && image->saveToFile(disk::pathString(path).c_str(), false);
     CC_SAFE_RELEASE(image);
     log::info("Smoke test: screen saved to {}: {}", path, ok);
+    logListsFit(name);
 }
 
 // Touch priorities of the popups on screen, the top one last: menus of the popups below it must come after
@@ -933,9 +946,101 @@ void logTouchPriorities(std::string_view when) {
 }
 
 void pressButton(std::string_view id) {
-    auto btn = typeinfo_cast<CCMenuItemSpriteExtra*>(CCScene::get()->getChildByIDRecursive(id));
-    log::info("Smoke test: pressing {}: {}", id, btn ? "found" : "not there");
-    if (btn) btn->activate();
+    auto node = CCScene::get()->getChildByIDRecursive(id);
+    auto item = typeinfo_cast<CCMenuItemSpriteExtra*>(node);
+    auto button = typeinfo_cast<Button*>(node);
+    log::info("Smoke test: pressing {}: {}", id, item || button ? "found" : "not there");
+    if (item) item->activate();
+    if (button) button->activate();
+}
+
+// A tap where a player's finger goes, through the game's touch dispatcher: it gets to the button only if the
+// button takes touches there (a menu's item or a Button, not under a popup). Pressing calls the button itself.
+void tapButton(std::string_view id) {
+    auto node = CCScene::get()->getChildByIDRecursive(id);
+    if (!node) return log::info("Smoke test: tapping {}: not there", id);
+    auto at = node->convertToWorldSpace({node->getContentWidth() / 2, node->getContentHeight() / 2});
+    log::info("Smoke test: tapping {} at {:.0f},{:.0f}", id, at.x, at.y);
+    auto ui = CCDirector::get()->convertToUI(at);
+    Ref<CCTouch> touch = new CCTouch();
+    touch->release();
+    touch->setTouchInfo(0, ui.x, ui.y);
+    // A set for each event, as the game's window makes them: the handler that takes the touch takes it out of the set.
+    auto touches = [&touch] {
+        auto set = CCSet::create();
+        set->addObject(touch);
+        return set;
+    };
+    auto dispatcher = CCDirector::get()->getTouchDispatcher();
+    dispatcher->touchesBegan(touches(), nullptr);
+    // Who took it: a swallowing handler above the button takes it from the button.
+    std::vector<std::string> takers;
+    for (auto handler : CCArrayExt<CCTargetedTouchHandler*>(dispatcher->m_pTargetedHandlers)) {
+        if (!handler->getClaimedTouches()->containsObject(touch)) continue;
+        auto delegate = handler->getDelegate();
+        auto node = dynamic_cast<CCNode*>(delegate);
+        takers.push_back(fmt::format("{} \"{}\" (priority {})", typeid(*delegate).name(), node ? node->getID() : "",
+            handler->getPriority()));
+    }
+    auto got = touch->getLocation();
+    log::info("Smoke test: tap at {:.0f},{:.0f} for the game, taken by {}", got.x, got.y,
+        takers.empty() ? std::string("nothing") : fmt::format("{}", fmt::join(takers, ", ")));
+    dispatcher->touchesEnded(touches(), nullptr);
+}
+
+// The scrolling lists on screen as a player sees them: each one inside its popup, and its rows' parts across it
+// (whatever sticks out at a side is cut off). Logged with each screenshot.
+void logListsFit(std::string const& when) {
+    auto rectOf = [](CCNode* node) {
+        auto a = node->convertToWorldSpace({0.f, 0.f});
+        auto b = node->convertToWorldSpace({node->getContentWidth(), node->getContentHeight()});
+        return CCRect(std::min(a.x, b.x), std::min(a.y, b.y), std::abs(b.x - a.x), std::abs(b.y - a.y));
+    };
+    auto within = [](CCRect const& part, CCRect const& box) {
+        return part.getMinX() >= box.getMinX() - 1.f && part.getMaxX() <= box.getMaxX() + 1.f &&
+            part.getMinY() >= box.getMinY() - 1.f && part.getMaxY() <= box.getMaxY() + 1.f;
+    };
+    std::vector<ScrollLayer*> lists;
+    std::function<void(CCNode*)> find = [&](CCNode* node) {
+        if (auto list = typeinfo_cast<ScrollLayer*>(node)) lists.push_back(list);
+        for (auto child : CCArrayExt<CCNode*>(node->getChildren())) find(child);
+    };
+    find(CCScene::get());
+    auto win = CCDirector::get()->getWinSize();
+    for (auto list : lists) {
+        if (!nodeIsVisible(list)) continue;
+        auto box = rectOf(list);
+        FLAlertLayer* popup = nullptr;
+        for (auto up = list->getParent(); up && !popup; up = up->getParent()) popup = typeinfo_cast<FLAlertLayer*>(up);
+        auto frame = popup && popup->m_mainLayer ? rectOf(popup->m_mainLayer) : CCRect(0.f, 0.f, win.width, win.height);
+        bool inside = within(box, frame);
+        // Rows, the plain nodes and menus in them and what those hold; labels and buttons as they are.
+        int parts = 0, out = 0;
+        std::string firstOut;
+        std::function<void(CCNode*)> check = [&](CCNode* node) {
+            if (!node->isVisible()) return;
+            if (node->getContentWidth() > 0.f) {
+                parts++;
+                auto r = rectOf(node);
+                if (r.getMinX() < box.getMinX() - 1.f || r.getMaxX() > box.getMaxX() + 1.f) {
+                    if (out++ == 0) firstOut = fmt::format("{} \"{}\" {:.0f} to {:.0f}", typeid(*node).name(), node->getID(),
+                        r.getMinX(), r.getMaxX());
+                }
+            }
+            if (typeid(*node) != typeid(CCNode) && !typeinfo_cast<CCMenu*>(node)) return;
+            for (auto child : CCArrayExt<CCNode*>(node->getChildren())) check(child);
+        };
+        int rows = 0;
+        for (auto row : CCArrayExt<CCNode*>(list->m_contentLayer->getChildren())) {
+            rows++;
+            check(row);
+        }
+        auto line = fmt::format("list \"{}\" {}: {:.0f},{:.0f} to {:.0f},{:.0f}, in its {} {}; {} rows, {} of {} parts across it{}",
+            list->getID(), when, box.getMinX(), box.getMinY(), box.getMaxX(), box.getMaxY(), popup ? "popup" : "screen",
+            inside ? "yes" : "NO", rows, parts - out, parts, out ? ", first out: " + firstOut : std::string());
+        if (inside && out == 0) log::info("Smoke test: {}", line);
+        else log::error("Smoke test: {}", line);
+    }
 }
 
 void afterFrames(int frames, std::function<void()> then);
@@ -1025,10 +1130,15 @@ void smokeUI(int stage) {
                     size.height, btn->isVisible());
             }
             else log::warn("Smoke test: no SP list button in the pause menu");
-            if (pause) splist::open(pause);
-            else log::error("Smoke test: no pause menu");
+            if (!pause) log::error("Smoke test: no pause menu");
+            tapButton("sp-list-button"_spr);
             return next();
         case 4:
+            if (CCScene::get()->getChildByIDRecursive("sp-rows"_spr)) log::info("Smoke test: the SP list opened by a tap");
+            else {
+                log::error("Smoke test: a tap on the SP list button opened nothing");
+                if (pause) splist::open(pause);
+            }
             captureScreen("smoke-list.png");
             if (g_smoke.dialogs) return smokeUI(20);
             if (!sps.empty()) splist::openRename(sps.front());
@@ -1243,9 +1353,14 @@ void smokeStorage(int stage) {
             return next();
         case 1:
             captureScreen("smoke-settings.png");
-            pressButton(id("storage-button"));
+            tapButton(id("storage-button"));
             return next();
         case 2: {
+            if (CCScene::get()->getChildByIDRecursive(id("storage-open-0"))) log::info("Smoke test: the storage opened by a tap");
+            else {
+                log::error("Smoke test: a tap on the storage button opened nothing");
+                pressButton(id("storage-button"));
+            }
             captureScreen("smoke-storage.png");
             int i = storageIndex([](auto const& l) { return l.versions.size() >= 2 && !l.open; });
             if (i < 0) i = storageIndex([](auto const& l) { return !l.versions.empty() && !l.open; });

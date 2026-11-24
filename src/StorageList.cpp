@@ -55,7 +55,8 @@ protected:
         m_mainLayer->addChildAtPosition(bg, Anchor::Center, {0.f, -6.f});
         m_list = ScrollLayer::create({LIST_WIDTH, LIST_HEIGHT});
         m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(2.f));
-        m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {-LIST_WIDTH / 2, -6.f - LIST_HEIGHT / 2});
+        // A ScrollLayer stands by its centre: on its background.
+        m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {0.f, -6.f});
 
         m_buttons = CCMenu::create();
         m_buttons->setContentSize({WIDTH - 30.f, 36.f});
@@ -442,7 +443,8 @@ class StorageSettingNode : public SettingNodeV3 {
 protected:
     bool init(std::shared_ptr<StorageSetting> setting, float width) {
         if (!SettingNodeV3::init(setting, width)) return false;
-        auto open = textButton(str(Msg::Open), [](auto) { storagelist::open(); }, 0.6f);
+        // The setting's button menu is a plain node: a Button takes touches by itself, a menu item there wouldn't.
+        auto open = Button::createWithNode(textButtonSprite(str(Msg::Open), 0.6f), [](auto) { storagelist::open(); });
         open->setID("storage-button"_spr);
         this->getButtonMenu()->addChildAtPosition(open, Anchor::Right, {-open->getScaledContentWidth() / 2 - 5.f, 0.f});
         this->getButtonMenu()->updateLayout();

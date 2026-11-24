@@ -42,11 +42,15 @@ namespace ui {
     }
 
     // `size` scales all of it.
-    inline CCMenuItemSpriteExtra* textButton(std::string const& caption, geode::Function<void(CCMenuItemSpriteExtra*)> callback,
-        float size = 1.f, char const* texture = "GJ_button_01.png") {
+    inline ButtonSprite* textButtonSprite(std::string const& caption, float size = 1.f, char const* texture = "GJ_button_01.png") {
         auto spr = ButtonSprite::create(caption.c_str(), 0, 0, 0.7f, false, text::fontFor(caption, true), texture, 30.f);
         spr->setScale(size);
-        return CCMenuItemExt::createSpriteExtra(spr, std::move(callback));
+        return spr;
+    }
+
+    inline CCMenuItemSpriteExtra* textButton(std::string const& caption, geode::Function<void(CCMenuItemSpriteExtra*)> callback,
+        float size = 1.f, char const* texture = "GJ_button_01.png") {
+        return CCMenuItemExt::createSpriteExtra(textButtonSprite(caption, size, texture), std::move(callback));
     }
 
     // The game has no pencil (its edit button is the editor's): the mod's, on a round button as big as the

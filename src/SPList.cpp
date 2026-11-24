@@ -73,7 +73,8 @@ protected:
 
         auto list = ScrollLayer::create({LIST_WIDTH, LIST_HEIGHT});
         list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(2.f));
-        m_mainLayer->addChildAtPosition(list, Anchor::Center, {-LIST_WIDTH / 2, -3.f - LIST_HEIGHT / 2});
+        // A ScrollLayer stands by its centre: on its background.
+        m_mainLayer->addChildAtPosition(list, Anchor::Center, {0.f, -3.f});
         auto content = list->m_contentLayer;
         for (size_t i = 0; i < rows.size(); i++) {
             m_picked.push_back(rows[i].enabled && rows[i].picked);
@@ -510,7 +511,7 @@ protected:
         m_list = ScrollLayer::create({LIST_WIDTH, LIST_HEIGHT});
         m_list->setID("version-rows"_spr);
         m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(2.f));
-        m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {-LIST_WIDTH / 2, -14.f - LIST_HEIGHT / 2});
+        m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {0.f, -14.f});
         this->rebuild();
         this->schedule(schedule_selector(VersionsPopup::rebuildIfOnTop));
         return true;
@@ -796,7 +797,7 @@ protected:
         m_list = ScrollLayer::create({LIST_WIDTH, LIST_HEIGHT});
         m_list->setID("sp-rows"_spr);
         m_list->m_contentLayer->setLayout(ScrollLayer::createDefaultListLayout(2.f));
-        m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {-LIST_WIDTH / 2, 3.f - LIST_HEIGHT / 2});
+        m_mainLayer->addChildAtPosition(m_list, Anchor::Center, {0.f, 3.f});
 
         // The auto part's length: a clock above the rows' right column (their play and delete buttons), as big as
         // their play button, with the length by it.
