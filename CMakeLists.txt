@@ -6,6 +6,7 @@ set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 project(SPCreator VERSION 0.9.0)
 
 add_library(${PROJECT_NAME} SHARED
+    src/Convert2081.cpp
     src/Disk.cpp
     src/main.cpp
     src/SPList.cpp

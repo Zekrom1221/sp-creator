@@ -1383,7 +1383,15 @@ void notifyLoaded(storage::Loaded const& loaded, size_t count) {
         case Notice::Loaded: notify(NotificationIcon::Info, Msg::Loaded, count); break;
         case Notice::Failed: notify(warn, Msg::Failed, loaded.failed); break;
         case Notice::LevelChanged:
-            if (!loaded.movedOver) notify(warn, Msg::LevelChanged);
+            if (loaded.from2081) {
+                // Not an update of the level: the SPs from before the game's.
+                if (loaded.notMoved.empty()) notify(NotificationIcon::Success, Msg::From2081, loaded.moved);
+                else {
+                    notify(fmt::format("{}, {}", text::format(Msg::From2081, loaded.moved),
+                        text::format(Msg::NotMoved, loaded.notMoved.size(), text::percents(loaded.notMoved))), warn);
+                }
+            }
+            else if (!loaded.movedOver) notify(warn, Msg::LevelChanged);
             else if (loaded.notMoved.empty()) notify(NotificationIcon::Success, Msg::LevelUpdated, loaded.moved);
             else {
                 notify(fmt::format("{}, {}", text::format(Msg::LevelUpdated, loaded.moved),

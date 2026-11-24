@@ -182,6 +182,8 @@ Result<> checkLevel(matjson::Value const& level, storage::LevelInfo const& open)
         return Err(text::format(Msg::OtherLevel, level["name"].asString().unwrapOr("?")));
     }
     if (key != open.key) return fail(key.ends_with(LOW_DETAIL_SUFFIX) ? Msg::ForLowDetail : Msg::ForFullDetail);
+    // Made in GD 2.2081 for this level version: open() converts them.
+    if (storage::fits2081(identity)) return Ok();
     if (identity["game"] != open.identity["game"]) {
         return Err(text::format(Msg::OtherGame, identity["game"].asString().unwrapOr("?")));
     }
@@ -352,6 +354,18 @@ Result<Pack> open(std::filesystem::path const& path) {
         if (!list.isArray() || list.size() != files.size()) return fail(Msg::PackDamaged);
         std::vector<std::string> names;
         for (size_t f = 0; f < files.size(); f++) names.push_back(list[f]["name"].asString().unwrapOr(""));
+        // SPs of GD 2.2081: as this game's files (those that can't be stay as they are, and come out damaged).
+        auto const& identity = manifest["level"]["identity"];
+        if (storage::fits2081(identity)) {
+            auto converted = storage::convertFiles2081(identity, files);
+            int done = 0;
+            for (size_t f = 0; f < files.size(); f++) {
+                if (!converted[f]) continue;
+                files[f] = std::move(*converted[f]);
+                done++;
+            }
+            log::info("Import: {}: {} of {} SPs of GD 2.2081 converted", disk::pathString(path), done, files.size());
+        }
         auto pack = collect(files, names, disk::pathString(path), MAX_UNPACKED);
         if (pack.items.empty()) return fail(Msg::PackDamaged);
         return Ok(std::move(pack));

@@ -15,7 +15,9 @@
 // the SPs belong to), names.json (the names players gave them), objects.bin (prints of the version's
 // objects, to move the SPs over when the level is updated) and one sp-<id>.spc file per SP: its
 // auto part and its checkpoint, the checkpoint as the game's own string (serializeCheckpoint, the way it saves
-// platformer levels); compressed (zlib) but for a short header.
+// platformer levels); compressed (zlib) but for a short header. SPs of GD 2.2081 (their checkpoints as
+// PersistenceAPI wrote them) are written again this way when their level is entered (Convert2081.hpp); their
+// folders are kept as they were in <root>-2.2081.
 namespace storage {
     // What load() has to tell the player.
     enum class Notice {
@@ -41,6 +43,9 @@ namespace storage {
         bool movedOver = false;
         int moved = 0;
         std::vector<float> notMoved;
+        // The set aside SPs were made in GD 2.2081: those moved over were converted (kept as they were apart, by
+        // the storage folder), the others too can't be in Versions.
+        bool from2081 = false;
     };
 
 #ifdef SPC_SMOKE
@@ -48,6 +53,9 @@ namespace storage {
     void setRoot(std::string_view utf8);
     // Off: objects other mods make between the level's batches take IDs from the level's, as in 0.9.0.
     void foreignCounter(bool on);
+    // On: each SP of GD 2.2081 read is dumped (its checkpoint as convert2081::dumpCheckpoint gives it) to
+    // <mod save dir>/convert-dump/<its folder>/<file>.json, for comparing with the Python reader.
+    void dump2081(bool on);
 #endif
     // Right before the level creates its objects (see Storage.cpp).
     void beforeCreatingObjects(PlayLayer* pl);
@@ -112,6 +120,13 @@ namespace storage {
     std::optional<LevelInfo> level();
     // Were SPs of this identity (LevelInfo::identity) made for the open level's version, game, platform?
     bool fits(matjson::Value const& identity);
+    // Were they made in GD 2.2081 for the open level's version (on this platform)? Then convertFiles2081 makes them
+    // this game's.
+    bool fits2081(matjson::Value const& identity);
+    // SP files of GD 2.2081 of that identity, each as this game's file of the open level version (as fileOf()
+    // gives them), or nothing where it can't be (in the log).
+    std::vector<std::optional<geode::ByteVector>> convertFiles2081(matjson::Value const& identity,
+        std::vector<geode::ByteVector> const& files);
     // The SP's file as saved (write SPs not saved yet first).
     geode::Result<geode::ByteVector> fileOf(StartPoint const& sp);
     // An SP file, checked as far as it can be without reading its checkpoint: whole, of this format and

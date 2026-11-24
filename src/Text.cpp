@@ -122,6 +122,7 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"Moved over to this level version: {}", "Перенесено на эту версию уровня: {}"},
     {"None of these SPs can be moved over ({}): the update took away objects they need",
         "Эти SP не получилось перенести ({}): обновление убрало нужные им объекты"},
+    {"SPs from GD 2.2081 brought over: {}", "SP из GD 2.2081 перенесены: {}"},
     {"SP storage", "Хранилище SP"},
     {"Levels: {}, {} in all", "Уровней: {}, всего {}"},
     {"No SPs saved yet", "Сохранённых SP пока нет"},

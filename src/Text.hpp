@@ -112,6 +112,7 @@ namespace text {
         VersionMovable,
         VersionMovedOver, // {count}
         NoneMoved,        // {percents}
+        From2081,         // {moved}
         // The storage manager.
         StorageTitle,
         StorageTotal,     // {levels} {size}

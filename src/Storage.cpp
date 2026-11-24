@@ -1,5 +1,6 @@
 #include "Storage.hpp"
 
+#include "Convert2081.hpp"
 #include "Disk.hpp"
 
 #include <Geode/utils/file.hpp>
@@ -30,8 +31,10 @@ constexpr char MAGIC[8] = {'S', 'P', 'C', 'R', 'E', 'A', 'T', 'R'};
 // A file with the body compressed after its header (see compress()). Older files hold it as it is (MAGIC).
 constexpr char COMPRESSED_MAGIC[8] = {'S', 'P', 'C', 'R', 'E', 'A', 'T', 'Z'};
 // 3: the checkpoint as the game's own string (serializeCheckpoint), GD 2.2091 on. 2: through PersistenceAPI (GD
-// 2.2081), read by nothing here: those SPs stay in their level's versions.
+// 2.2081): read only to be written again as 3 (Convert2081.cpp), when their level is entered.
 constexpr int FORMAT_VERSION = 3;
+constexpr int FORMAT_2081 = 2;
+constexpr char const* GAME_2081 = "2.2081";
 constexpr unsigned int END_MARKER = 0x21505321;  // "!SP!"
 // After the body: its hash and the end marker.
 constexpr size_t SEAL_SIZE = sizeof(uint64_t) + sizeof(END_MARKER);
@@ -55,6 +58,9 @@ constexpr int FIRST_SP_OBJECT_ID = 0x50000000;
 constexpr int FIRST_STAND_IN_ID = 0x7a000000;
 
 std::filesystem::path g_root = "levels";
+#ifdef SPC_SMOKE
+bool g_dump2081 = false;  // storage::dump2081()
+#endif
 
 // What tells a level object from the others, in one level version and the next: the same object (not
 // changed by the update) has the same print. Saved with the SPs (objects.bin), so that SPs of an older
@@ -201,6 +207,13 @@ public:
     }
     size_t left() const {
         return m_bytes.size() - m_at;
+    }
+    ByteSpan bytes() const {
+        return m_bytes;
+    }
+    void skipTo(size_t at) {
+        if (at < m_at || at > m_bytes.size()) throw std::out_of_range("past the end of the body");
+        m_at = at;
     }
 };
 
@@ -501,6 +514,25 @@ CheckpointObject* readCheckpoint(BodyReader& in, std::string& error) {
     return cp;
 }
 
+// A checkpoint of GD 2.2081, as PersistenceAPI wrote it, read into one of this game: objects by their places in
+// that version (`objects`). Running out of bytes throws (a damaged file); anything else that doesn't fit, `error`.
+CheckpointObject* readCheckpoint2081(BodyReader& in, convert2081::Objects const& objects, std::string& error) {
+    size_t at = in.done();
+    CheckpointObject* cp = nullptr;
+    try {
+        cp = convert2081::readCheckpoint(in.bytes(), at, objects);
+    }
+    catch (std::out_of_range const&) {
+        throw;
+    }
+    catch (std::exception const& e) {
+        error = fmt::format("its checkpoint of GD {} can't be read: {}", GAME_2081, e.what());
+        return nullptr;
+    }
+    in.skipTo(at);
+    return cp;
+}
+
 // Body: magic, format, level stamp, the SP's own data, the checkpoint, the presses. fileFor() then compresses
 // and seals it.
 void writeSP(BodyWriter& out, StartPoint const& sp) {
@@ -703,8 +735,10 @@ uint64_t contentHash(ByteSpan body) {
     return hashBytes(body.data() + ID_AT + 4, body.size() - ID_AT - 4, h);
 }
 
-// `body` as bodyOf gives it.
-std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStamp, std::string& error, ReadError& kind) {
+// `body` as bodyOf gives it. With `from2081`, a file of GD 2.2081 (format 2), its checkpoint's objects by their places
+// in its version; it's read just as one of this game but for the checkpoint.
+std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStamp, std::string& error, ReadError& kind,
+    convert2081::Objects const* from2081 = nullptr) {
     size_t bodySize = body.size();
     BodyReader in(body);
     char magic[sizeof(MAGIC)] = {};
@@ -713,8 +747,9 @@ std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStam
     unsigned long long stamp = 0;
     in >> format;
     in >> stamp;
-    if (std::memcmp(magic, MAGIC, sizeof(MAGIC)) != 0 || format != FORMAT_VERSION) {
-        error = fmt::format("not an SP file of format {}", FORMAT_VERSION);
+    int wanted = from2081 ? FORMAT_2081 : FORMAT_VERSION;
+    if (std::memcmp(magic, MAGIC, sizeof(MAGIC)) != 0 || format != wanted) {
+        error = fmt::format("not an SP file of format {}", wanted);
         return nullptr;
     }
     if (stamp != versionStamp) {
@@ -760,7 +795,7 @@ std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStam
         error = "no checkpoint";
         return nullptr;
     }
-    sp->cp = readCheckpoint(in, error);
+    sp->cp = from2081 ? readCheckpoint2081(in, *from2081, error) : readCheckpoint(in, error);
     if (!sp->cp) return nullptr;
     sp->pressHolds = in.left() == 0;
     if (!sp->pressHolds) {
@@ -777,9 +812,10 @@ std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStam
     return sp;
 }
 
-// An SP file of the level version `versionStamp` (levelStamp()) stands for.
+// An SP file of the level version `versionStamp` (levelStamp()) stands for (of GD 2.2081 with `from2081`, see
+// readBody).
 std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, uint64_t versionStamp, std::string& error,
-    ReadError& kind) {
+    ReadError& kind, convert2081::Objects const* from2081 = nullptr) {
     kind = ReadError::Other;
     // The whole file is checked against its seal first (and a compressed one unpacked): past that it isn't cut off
     // or changed since it was sealed.
@@ -795,7 +831,19 @@ std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, ui
         return nullptr;
     }
     try {
-        return readBody(body, id, versionStamp, error, kind);
+        auto sp = readBody(body, id, versionStamp, error, kind, from2081);
+#ifdef SPC_SMOKE
+        if (sp && from2081 && g_dump2081) {
+            auto to = disk::saveDir() / "convert-dump" / path.parent_path().filename();
+            std::error_code ec;
+            std::filesystem::create_directories(to, ec);
+            to /= path.filename();
+            to += ".json";
+            auto res = disk::writeString(to, convert2081::dumpCheckpoint(sp->cp, *from2081).dump(0));
+            if (res.isErr()) log::error("Smoke test: can't dump {}: {}", to, res.unwrapErr());
+        }
+#endif
+        return sp;
     } catch (std::exception const& e) {
         // Whole, but not what an SP file holds (an imported file can be anything).
         kind = ReadError::Damaged;
@@ -846,6 +894,9 @@ void compressOlder(std::filesystem::path const& dir) {
 }
 
 int& idCounter();
+std::vector<std::filesystem::path> spFilesOf(std::filesystem::path const& dir);
+std::string nameOf(std::filesystem::path const& path);
+std::string versionKeyOf(std::string const& name);
 
 // A stand-in for a level object an update took away, of the same kind (its object ID), for while an SP of the older
 // version is read (readOtherVersion()). Outside the level, with an ID of its own (FIRST_STAND_IN_ID on): none may stay
@@ -936,9 +987,175 @@ void sortPercents(std::vector<float>& percents) {
 
 struct OtherVersion {
     bool known = false;  // its objects are known, and its checkpoints read like the open version's: SPs can move
+    bool from2081 = false;  // SPs of GD 2.2081, their checkpoints read into this game's
     std::vector<std::shared_ptr<StartPoint>> sps;  // moved over: with the open version's objects, ids as there
     std::vector<float> notMoved;                   // percents of the others (NaN: unknown), lowest first
 };
+
+// SPs of GD 2.2081 (format 2), by their folder's level.json, on this platform: their checkpoints are read into this
+// game's (Convert2081.cpp), and the SPs written again as this game's.
+bool from2081(matjson::Value const& saved, matjson::Value const& now) {
+    return saved.isObject() && saved["format"].asInt().unwrapOr(0) == FORMAT_2081 &&
+        saved["game"].asString().unwrapOr("") == GAME_2081 && saved.contains("platform") && saved["platform"] == now["platform"];
+}
+
+// The same level version (its version and its objects), whatever game made the SPs.
+bool sameVersion(matjson::Value const& saved, matjson::Value const& now) {
+    return saved.isObject() && saved.contains("version") && saved.contains("objects") && saved["version"] == now["version"] &&
+        saved["objects"] == now["objects"];
+}
+
+// A level version's objects by their places in it, as SPs of GD 2.2081 refer to them: the open version's same
+// objects, stand-ins for those gone (standIn()), the players.
+class OldPlaces : public convert2081::Objects {
+    PlayLayer* m_pl;
+    std::vector<GameObject*> m_byPlace;
+    mutable std::unordered_map<GameObject*, int> m_places;
+
+public:
+    OldPlaces(PlayLayer* pl, std::vector<GameObject*> byPlace) : m_pl(pl), m_byPlace(std::move(byPlace)) {}
+
+    GameObject* at(int place) const override {
+        if (place >= 0) {
+            if (place >= static_cast<int>(m_byPlace.size())) {
+                throw std::runtime_error(fmt::format("object {}, the level version has {}", place, m_byPlace.size()));
+            }
+            return m_byPlace[place];
+        }
+        // As PersistenceAPI: -2 and -3 the players, anything else below 0 none.
+        if (place == -2) return m_pl->m_player1;
+        if (place == -3) return m_pl->m_player2;
+        return nullptr;
+    }
+
+    int placeOf(GameObject* obj) const override {
+        if (!obj) return -1;
+        if (obj == m_pl->m_player1) return -2;
+        if (obj == m_pl->m_player2) return -3;
+        if (m_places.empty()) {
+            for (int i = static_cast<int>(m_byPlace.size()); i-- > 0;) m_places[m_byPlace[i]] = i;
+        }
+        auto it = m_places.find(obj);
+        return it == m_places.end() ? -404 : it->second;
+    }
+};
+
+// SPs of GD 2.2081 for this very level version (sameVersion()) with the prints `old` kept with them (none: from before
+// prints were kept): do the open version's objects stand at the same places? The same kind of object in each place
+// (GD 2.2091 gives some objects another print than 2.2081 did, decoration a fraction of a unit off, but makes them
+// in the same order). Then they're found by their places, as PersistenceAPI referred to them.
+// The level key SP files of GD 2.2081 in a folder with this level.json were stamped with (levelStamp()): the open
+// level's, or the one its own level had in 2.2081 (findOwnLevel2081() keeps it there).
+std::string stampKey2081(matjson::Value const& saved) {
+    return saved["key2081"].asString().unwrapOr(g_level.plainKey);
+}
+
+// The same kind of object in each place of `old` and `now`; `otherPrint` of them printed otherwise.
+bool sameKinds(std::vector<ObjectPrint> const& old, std::vector<ObjectPrint> const& now, size_t& otherPrint) {
+    otherPrint = 0;
+    if (old.size() != now.size()) return false;
+    for (size_t i = 0; i < old.size(); i++) {
+        if (old[i].id != now[i].id) return false;
+        otherPrint += old[i].hash != now[i].hash;
+    }
+    return true;
+}
+
+bool samePlaces2081(std::vector<ObjectPrint> const& old) {
+    if (old.empty()) return true;
+    size_t otherPrint = 0;
+    if (!sameKinds(old, g_level.prints, otherPrint)) return false;
+    if (otherPrint) log::info("{}: {} objects printed otherwise than in GD {}, in the same places", g_level.key, otherPrint, GAME_2081);
+    return true;
+}
+
+// The player's own levels go by their objects (levelKey()), and GD 2.2091 prints some objects otherwise than 2.2081
+// did: their SPs of 2.2081 are in a folder of another key. The folder of the level's name, version and objects, each
+// place holding the same kind of object (by its prints; without them, the only such folder), takes this key, and its
+// versions with it. False if one was found but couldn't be renamed.
+bool findOwnLevel2081(std::filesystem::path const& root, std::string const& key, matjson::Value const& info,
+    std::vector<ObjectPrint> const& prints) {
+    bool ldm = key.ends_with(LOW_DETAIL_SUFFIX);
+    std::filesystem::path best;
+    size_t bestSame = 0, found = 0;
+    bool bestHasPrints = false;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(root, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        auto name = nameOf(it->path());
+        if (!name.starts_with("editor-") || name == key || name.ends_with(LOW_DETAIL_SUFFIX) != ldm || !versionKeyOf(name).empty()) continue;
+        auto saved = disk::readJson(it->path() / "level.json");
+        if (saved.isErr() || !from2081(saved.unwrap(), info) || saved.unwrap()["name"] != info["name"] || !sameVersion(saved.unwrap(), info)) {
+            continue;
+        }
+        auto old = readPrints(it->path() / PRINTS_FILE);
+        size_t otherPrint = 0;
+        if (!old.empty() && !sameKinds(old, prints, otherPrint)) continue;
+        found++;
+        size_t same = old.empty() ? 0 : old.size() - otherPrint;
+        if (best.empty() || (!old.empty() && (!bestHasPrints || same > bestSame))) {
+            best = it->path();
+            bestSame = same;
+            bestHasPrints = !old.empty();
+        }
+    }
+    // Without prints only if it's the only one.
+    if (best.empty() || (!bestHasPrints && found > 1)) return true;
+    auto oldKey = nameOf(best);
+    // Its files were stamped with its key (without the mode's suffix): kept for reading them.
+    auto oldPlainKey = ldm ? oldKey.substr(0, oldKey.size() - LOW_DETAIL_SUFFIX.size()) : oldKey;
+    auto keepKey = [&](std::filesystem::path const& dir) {
+        auto saved = disk::readJson(dir / "level.json");
+        if (saved.isErr()) return;
+        auto json = saved.unwrap();
+        json["key2081"] = oldPlainKey;
+        (void)disk::writeStringSafe(dir / "level.json", json.dump());
+    };
+    std::vector<std::filesystem::path> versions;
+    for (auto it = std::filesystem::directory_iterator(root, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (versionKeyOf(nameOf(it->path())) == oldKey) versions.push_back(it->path());
+    }
+    keepKey(best);
+    std::filesystem::rename(best, root / key, ec);
+    log::info("{}: SPs of GD {} of this level found in {} ({} of its objects printed the same): {}", key, GAME_2081, oldKey, bestSame,
+        ec ? ec.message() : "renamed");
+    if (ec) return false;
+    for (auto const& v : versions) {
+        auto name = nameOf(v);
+        auto to = root / (key + name.substr(oldKey.size()));
+        keepKey(v);
+        std::error_code ec2;
+        std::filesystem::rename(v, to, ec2);
+        log::info("{}: its version {} -> {} ({})", key, name, to.filename(), ec2 ? ec2.message() : "ok");
+    }
+    return true;
+}
+
+// The open version's objects at their places.
+std::vector<GameObject*> objectsByPlace(PlayLayer* pl) {
+    std::vector<GameObject*> out;
+    out.reserve(pl->m_objects->count());
+    for (auto obj : CCArrayExt<GameObject*>(pl->m_objects)) out.push_back(obj);
+    return out;
+}
+
+// Folders of SPs of GD 2.2081 are kept as they were, by the storage (<root>-2.2081): out of the player's way (Versions,
+// the storage manager), in case they have to be read again.
+bool keepOriginal2081(std::filesystem::path const& dir, bool move) {
+    auto root = g_root;
+    root += "-2.2081";
+    root = disk::saveDir() / root;
+    std::error_code ec;
+    std::filesystem::create_directories(root, ec);
+    auto to = root / dir.filename();
+    for (int n = 1; std::filesystem::exists(to, ec); n++) {
+        to = root / dir.filename();
+        to += fmt::format("-{}", n);
+    }
+    if (move) std::filesystem::rename(dir, to, ec);
+    else std::filesystem::copy(dir, to, std::filesystem::copy_options::recursive, ec);
+    log::info("SPs of GD {} in {} kept as they were: {} ({})", GAME_2081, dir.filename(), to, ec ? ec.message() : "ok");
+    return !ec;
+}
 
 // SPs of `dir`, a version of the open level made for another level version, each read with the objects it
 // refers to found among the open version's by their prints. What it keeps of objects the update took away
@@ -948,16 +1165,22 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
     OtherVersion out;
     RealObjects real;
     auto info = disk::readJson(dir / "level.json");
-    if (g_level.prints.empty() || info.isErr() || !sameGame(info.unwrap(), g_level.info)) return out;
+    if (g_level.prints.empty() || info.isErr()) return out;
+    out.from2081 = from2081(info.unwrap(), g_level.info);
+    if (!out.from2081 && !sameGame(info.unwrap(), g_level.info)) return out;
     auto old = readPrints(dir / PRINTS_FILE);
+    // SPs of GD 2.2081 of this very version: its objects at the same places (samePlaces2081), prints kept or not.
+    if (out.from2081 && sameVersion(info.unwrap(), g_level.info) && samePlaces2081(old)) old = g_level.prints;
     if (old.empty() || static_cast<int64_t>(old.size()) != info.unwrap()["objects"].asInt().unwrapOr(-1)) return out;
 
     // The same print, the same object; objects alike (on top of each other) pair up in order.
     std::unordered_map<uint64_t, std::vector<unsigned int>> where;
     for (unsigned int i = 0; i < g_level.prints.size(); i++) where[g_level.prints[i].hash].push_back(i);
     std::unordered_map<uint64_t, size_t> taken;
-    // That version's unique IDs: its objects' places + FIRST_OBJECT_ID (load() checks the order).
+    // That version's unique IDs: its objects' places + FIRST_OBJECT_ID (load() checks the order). SPs of GD 2.2081
+    // refer to them by their places.
     std::unordered_map<int, GameObject*> byOldId;
+    std::vector<GameObject*> byPlace(old.size());
     std::set<GameObject*> standIns;
     size_t found = 0;
     for (size_t i = 0; i < old.size(); i++) {
@@ -965,13 +1188,13 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
         auto it = where.find(old[i].hash);
         auto& next = taken[old[i].hash];
         if (it != where.end() && next < it->second.size() && g_level.prints[it->second[next]].id == old[i].id) {
-            byOldId[oldId] = static_cast<GameObject*>(pl->m_objects->objectAtIndex(it->second[next++]));
+            byOldId[oldId] = byPlace[i] = static_cast<GameObject*>(pl->m_objects->objectAtIndex(it->second[next++]));
             found++;
             continue;
         }
         auto obj = standIn(old[i].id);
         if (!obj) return out;
-        byOldId[oldId] = obj;
+        byOldId[oldId] = byPlace[i] = obj;
         standIns.insert(obj);
     }
     log::info("{}: {} of the {} objects of {} are in this version", g_level.key, found, old.size(), dir.filename());
@@ -984,13 +1207,17 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
     std::sort(files.begin(), files.end());
     auto names = disk::readJson(dir / "names.json").unwrapOr(matjson::Value::object());
     if (!names.isObject()) names = matjson::Value::object();
-    uint64_t stamp = levelStamp(g_level.plainKey, info.unwrap());
-    UidMapOn on(pl, std::move(byOldId));
+    uint64_t stamp = levelStamp(out.from2081 ? stampKey2081(info.unwrap()) : g_level.plainKey, info.unwrap());
+    // Checkpoints of this game: the game finds their objects by that version's IDs. Of GD 2.2081: by their places.
+    std::optional<UidMapOn> on;
+    std::optional<OldPlaces> places;
+    if (out.from2081) places.emplace(pl, std::move(byPlace));
+    else on.emplace(pl, std::move(byOldId));
     out.known = true;
     for (auto const& [id, path] : files) {
         std::string error;
         ReadError kind;
-        auto sp = readSP(path, id, stamp, error, kind);
+        auto sp = readSP(path, id, stamp, error, kind, places ? &*places : nullptr);
         // The states of objects gone go; any other reference to a stand-in (the game writes references as unique
         // IDs) shows in the checkpoint written again.
         int dropped = sp ? dropStandIns(sp->cp, standIns) : 0;
@@ -1017,11 +1244,89 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
 bool canMoveOver(std::filesystem::path const& dir) {
     if (g_level.prints.empty()) return false;
     auto info = disk::readJson(dir / "level.json");
-    if (info.isErr() || !sameGame(info.unwrap(), g_level.info)) return false;
+    if (info.isErr()) return false;
+    bool old2081 = from2081(info.unwrap(), g_level.info);
+    if (!old2081 && !sameGame(info.unwrap(), g_level.info)) return false;
     auto count = info.unwrap()["objects"].asInt().unwrapOr(-1);
     std::error_code ec;
     auto size = std::filesystem::file_size(dir / PRINTS_FILE, ec);
+    if (ec && old2081 && sameVersion(info.unwrap(), g_level.info)) return true;
     return !ec && count >= 0 && size == printsFileSize(static_cast<size_t>(count));
+}
+
+// The SP's file as save() writes it, for the open level version: sealed with its hash, which readSP checks
+// before it reads anything.
+Result<ByteVector> fileFor(StartPoint const& sp) {
+    // The game writes references to objects by their unique IDs, not their places: but in case.
+    RealObjects real;
+    BodyWriter out;
+    writeSP(out, sp);
+    std::string error;
+    auto file = compress(out.bytes(), error);
+    if (!file) return Err(error);
+    return Ok(std::move(*file));
+}
+
+// The SP's file at `path`, whole or not at all.
+bool writeSPFile(StartPoint const& sp, std::filesystem::path const& path) {
+    auto file = fileFor(sp);
+    // Written in full (to path.tmp, which load() deletes if a crash leaves it), then put in place: a crash
+    // while saving leaves no damaged SP behind.
+    if (file.isOk()) {
+        if (auto res = disk::writeBinarySafe(path, file.unwrap()); res.isErr()) file = Err(res.unwrapErr());
+    }
+    if (file.isErr()) {
+        log::error("Can't save SP {} to {}: {}", sp.id, path, file.unwrapErr());
+        return false;
+    }
+    return true;
+}
+
+// A version of the open level holding SPs of GD 2.2081 for this very level version: once its folder is kept as it was
+// (keepOriginal2081), its SP files are written again as this game's, in place; it's a version of this game's then.
+// One that can't be read stays there by another name (sp-<id>.spc.2081), out of the way. Versions for another level
+// version stay as they are, for moving over (moveVersion()).
+void convertVersion2081(PlayLayer* pl, std::filesystem::path const& dir) {
+    auto saved = disk::readJson(dir / "level.json");
+    if (saved.isErr() || !from2081(saved.unwrap(), g_level.info)) return;
+    if (!sameVersion(saved.unwrap(), g_level.info)) {
+        log::info("{}: SPs of GD {} for another level version, left for moving over", dir.filename(), GAME_2081);
+        return;
+    }
+    if (!samePlaces2081(readPrints(dir / PRINTS_FILE))) {
+        log::info("{}: SPs of GD {} whose objects aren't this version's, left for moving over", dir.filename(), GAME_2081);
+        return;
+    }
+    if (!keepOriginal2081(dir, false)) return;
+    RealObjects real;
+    OldPlaces places(pl, objectsByPlace(pl));
+    uint64_t stamp = levelStamp(stampKey2081(saved.unwrap()), saved.unwrap());
+    auto start = std::chrono::steady_clock::now();
+    int done = 0, failed = 0;
+    std::error_code ec;
+    for (auto const& path : spFilesOf(dir)) {
+        int id = idFromName(path);
+        std::string error;
+        ReadError kind;
+        auto sp = readSP(path, id, stamp, error, kind, &places);
+        if (sp && writeSPFile(*sp, path)) {
+            done++;
+            continue;
+        }
+        failed++;
+        auto aside = path;
+        aside += ".2081";
+        std::filesystem::rename(path, aside, ec);
+        log::error("SP file {} of {} not converted: {} (kept as {})", path.filename(), dir.filename(), sp ? "not written" : error,
+            aside.filename());
+    }
+    // A version of this level version now (it fits).
+    if (auto res = disk::writeStringSafe(dir / "level.json", g_level.info.dump()); res.isErr()) {
+        log::error("Can't write {}: {}", dir / "level.json", res.unwrapErr());
+    }
+    writePrints(dir / PRINTS_FILE, g_level.prints);
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    log::info("{}: {} SPs of GD {} written as this game's in {:.0f} ms, {} not", dir.filename(), done, GAME_2081, ms, failed);
 }
 
 // SPs placed with Low Detail Mode on before each mode had its own folder are in the plain one: they go
@@ -1045,6 +1350,15 @@ bool moveLowDetailSPs(PlayLayer* pl, std::filesystem::path const& root, std::str
     std::filesystem::rename(plain, low, ec);
     log::info("SPs of {} were placed with Low Detail Mode on: moved to {} ({})", key, low, ec ? ec.message() : "ok");
     return !ec;
+}
+
+std::vector<std::filesystem::path> spFilesOf(std::filesystem::path const& dir) {
+    std::vector<std::filesystem::path> out;
+    std::error_code ec;
+    for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (idFromName(it->path()) > 0) out.push_back(it->path());
+    }
+    return out;
 }
 
 bool hasSPFiles(std::filesystem::path const& dir) {
@@ -1197,6 +1511,10 @@ void setRoot(std::string_view utf8) {
 void foreignCounter(bool on) {
     g_foreignCounterOn = on;
 }
+
+void dump2081(bool on) {
+    g_dump2081 = on;
+}
 #endif
 
 void beforeCreatingObjects(PlayLayer* pl) {
@@ -1267,6 +1585,12 @@ Loaded load(PlayLayer* pl) {
     auto root = disk::saveDir() / g_root;
     auto dir = root / key;
     auto info = identity(pl);
+    std::error_code noFolder;
+    if (key.starts_with("editor-") && !std::filesystem::exists(dir / "level.json", noFolder) &&
+        !findOwnLevel2081(root, key, info, printsOf(pl))) {
+        out.notice = g_offBecause = Notice::CantMoveAside;
+        return out;
+    }
     if (!moveLowDetailSPs(pl, root, plainKey, info)) {
         out.notice = g_offBecause = Notice::CantMoveLowDetail;
         return out;
@@ -1326,14 +1650,22 @@ Loaded load(PlayLayer* pl) {
         // An update: the SPs that can be are moved over, keeping their ids and names, and load as the rest.
         auto other = readOtherVersion(pl, oldVersion);
         out.movedOver = other.known;
+        out.from2081 = other.from2081;
         // Moved over: those that load below (`moved`).
         for (auto const& sp : other.sps) {
             if (!save(*sp)) other.notMoved.push_back(sp->percent);
         }
         if (!other.sps.empty()) saveNames(other.sps);
+        // Of GD 2.2081, those that couldn't be moved over at all don't stay in Versions either.
+        if (other.from2081 && !other.known) {
+            for (auto const& path : spFilesOf(oldVersion)) other.notMoved.push_back(percentIn(path));
+        }
         sortPercents(other.notMoved);
         out.notMoved = std::move(other.notMoved);
+        if (other.from2081) keepOriginal2081(oldVersion, true);
     }
+    // Versions of the level set aside on GD 2.2081, for this very version: this game's SPs from now on.
+    for (auto const& v : versionsOf(dir, info)) convertVersion2081(pl, v.dir);
     // Once: what was saved before SP files were compressed, here and in the level's versions.
     compressOlder(dir);
     for (auto const& v : versionsOf(dir, info)) compressOlder(v.dir);
@@ -1392,38 +1724,6 @@ Loaded load(PlayLayer* pl) {
         }
     }
     return out;
-}
-
-namespace {
-
-// The SP's file as save() writes it, for the open level version: sealed with its hash, which readSP checks
-// before it reads anything.
-Result<ByteVector> fileFor(StartPoint const& sp) {
-    // The game writes references to objects by their unique IDs, not their places: but in case.
-    RealObjects real;
-    BodyWriter out;
-    writeSP(out, sp);
-    std::string error;
-    auto file = compress(out.bytes(), error);
-    if (!file) return Err(error);
-    return Ok(std::move(*file));
-}
-
-// The SP's file at `path`, whole or not at all.
-bool writeSPFile(StartPoint const& sp, std::filesystem::path const& path) {
-    auto file = fileFor(sp);
-    // Written in full (to path.tmp, which load() deletes if a crash leaves it), then put in place: a crash
-    // while saving leaves no damaged SP behind.
-    if (file.isOk()) {
-        if (auto res = disk::writeBinarySafe(path, file.unwrap()); res.isErr()) file = Err(res.unwrapErr());
-    }
-    if (file.isErr()) {
-        log::error("Can't save SP {} to {}: {}", sp.id, path, file.unwrapErr());
-        return false;
-    }
-    return true;
-}
-
 }
 
 bool save(StartPoint const& sp) {
@@ -1546,6 +1846,42 @@ std::optional<LevelInfo> level() {
 
 bool fits(matjson::Value const& identity) {
     return !g_level.dir.empty() && sameLevel(identity, g_level.info);
+}
+
+bool fits2081(matjson::Value const& identity) {
+    return !g_level.dir.empty() && PlayLayer::get() && from2081(identity, g_level.info) && sameVersion(identity, g_level.info);
+}
+
+std::vector<std::optional<ByteVector>> convertFiles2081(matjson::Value const& identity, std::vector<ByteVector> const& files) {
+    std::vector<std::optional<ByteVector>> out(files.size());
+    auto pl = PlayLayer::get();
+    if (!fits2081(identity)) return out;
+    RealObjects real;
+    OldPlaces places(pl, objectsByPlace(pl));
+    uint64_t stamp = levelStamp(g_level.plainKey, identity);
+    for (size_t f = 0; f < files.size(); f++) {
+        std::string error;
+        ByteVector unpacked;
+        auto body = bodyOf(files[f], unpacked, error);
+        std::shared_ptr<StartPoint> sp;
+        if (!body.empty()) {
+            try {
+                int id = 0;
+                if (body.size() >= ID_AT + sizeof(id)) std::memcpy(&id, body.data() + ID_AT, sizeof(id));
+                ReadError kind;
+                sp = readBody(body, id, stamp, error, kind, &places);
+            } catch (std::exception const& e) {
+                error = fmt::format("not readable: {}", e.what());
+            }
+        }
+        auto file = sp ? fileFor(*sp) : Result<ByteVector>(Err(error));
+        if (file.isErr()) {
+            log::warn("Import: SP {} of GD {} not converted: {}", f + 1, GAME_2081, file.unwrapErr());
+            continue;
+        }
+        out[f] = std::move(file).unwrap();
+    }
+    return out;
 }
 
 Result<ByteVector> fileOf(StartPoint const& sp) {

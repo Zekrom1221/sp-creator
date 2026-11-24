@@ -435,7 +435,9 @@ void startSmokeTest() {
     g_smoke.exportTo = root["export_to"].asString().unwrapOr("");
     g_smoke.importFrom = root["import_from"].asString().unwrapOr("");
     g_smoke.checkSaved = root["check_saved"].asBool().unwrapOr(false);
-    if (root["storage_ui"].asBool().unwrapOr(false)) {
+    // "storage_from" without the storage manager: the level's SPs (and the rest) from a copy, as the player's would be.
+    bool copyStorage = root["storage_ui"].asBool().unwrapOr(false) || root.contains("storage_from");
+    if (copyStorage) {
         auto dir = disk::saveDir();
         auto name = root["storage_root"].asString().unwrapOr("");
         auto from = root["storage_from"].asString().unwrapOr("levels");
@@ -443,12 +445,16 @@ void startSmokeTest() {
         if (name.starts_with("levels-smoketest")) {
             std::error_code ec;
             std::filesystem::remove_all(dir / name, ec);
+            auto originals = dir / name;
+            originals += "-2.2081";
+            std::filesystem::remove_all(originals, ec);
             std::filesystem::copy(dir / from, dir / name, std::filesystem::copy_options::recursive, ec);
             log::info("Smoke test: storage: {} copied to {} ({})", from, name, ec ? ec.message() : "ok");
-            g_smoke.storageUI = !ec;
+            g_smoke.storageUI = !ec && root["storage_ui"].asBool().unwrapOr(false);
         }
-        else log::error("Smoke test: storage_ui needs a storage_root of its own (levels-smoketest...)");
+        else log::error("Smoke test: storage_from needs a storage_root of its own (levels-smoketest...)");
     }
+    storage::dump2081(root["dump_2081"].asBool().unwrapOr(false));
     g_smoke.dialogs = root["dialogs"].asBool().unwrapOr(false);
     g_smoke.probe = root["probe"].asBool().unwrapOr(false);
     g_smoke.moveVersion = root["move_version"].asBool().unwrapOr(false);
