@@ -4,6 +4,7 @@
 #include <Geode/utils/file.hpp>
 
 #include "Core.hpp"
+#include "Disk.hpp"
 #include "SPList.hpp"
 #include "Storage.hpp"
 #include "Text.hpp"
@@ -176,7 +177,7 @@ protected:
         auto bytes = std::make_shared<ByteVector>(std::move(data).unwrap());
         bool opened = transfer::chooseFile(true, level ? level->name : "", [bytes, packed](std::optional<std::filesystem::path> path) {
             if (!path) return;
-            if (auto written = file::writeBinarySafe(*path, *bytes); written.isErr()) {
+            if (auto written = disk::writeBinarySafe(*path, *bytes); written.isErr()) {
                 log::error("Export: can't write {}: {}", *path, written.unwrapErr());
                 return core::notify(NotificationIcon::Error, str(Msg::ExportFailed));
             }

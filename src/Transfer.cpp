@@ -1,5 +1,7 @@
 #include "Transfer.hpp"
 
+#include "Disk.hpp"
+
 #include "Text.hpp"
 
 #include <Geode/utils/file.hpp>
@@ -161,7 +163,7 @@ std::optional<std::filesystem::path> showDialog(bool save, HWND owner, std::wstr
 // A name typed with another extension ("sps.txt") gets the mod's added, which the dialog's overwrite
 // question didn't cover: then a name no file has.
 std::filesystem::path withExtension(std::filesystem::path path) {
-    if (utils::string::toLower(utils::string::pathToString(path.extension())) == transfer::EXTENSION) return path;
+    if (utils::string::toLower(disk::pathString(path.extension())) == transfer::EXTENSION) return path;
     auto base = path;
     path += transfer::EXTENSION;
     std::error_code ec;
@@ -323,7 +325,7 @@ Result<Pack> open(std::filesystem::path const& path) {
         return fail(Msg::NotAPack);
     }
     if (size > MAX_PACK_SIZE) return fail(Msg::PackTooBig);
-    auto data = file::readBinary(path);
+    auto data = disk::readBinary(path);
     if (data.isErr()) {
         log::error("Import: {}: {}", path, data.unwrapErr());
         return fail(Msg::NotAPack);
@@ -350,7 +352,7 @@ Result<Pack> open(std::filesystem::path const& path) {
         if (!list.isArray() || list.size() != files.size()) return fail(Msg::PackDamaged);
         std::vector<std::string> names;
         for (size_t f = 0; f < files.size(); f++) names.push_back(list[f]["name"].asString().unwrapOr(""));
-        auto pack = collect(files, names, utils::string::pathToString(path), MAX_UNPACKED);
+        auto pack = collect(files, names, disk::pathString(path), MAX_UNPACKED);
         if (pack.items.empty()) return fail(Msg::PackDamaged);
         return Ok(std::move(pack));
     } catch (std::exception const& e) {
@@ -387,7 +389,7 @@ Result<Pack> openVersion(storage::Version const& version) {
         names.push_back(std::move(sp.name));
     }
     // The player's own: as many as it holds.
-    auto pack = collect(files, names, utils::string::pathToString(version.dir), std::numeric_limits<uint64_t>::max());
+    auto pack = collect(files, names, disk::pathString(version.dir), std::numeric_limits<uint64_t>::max());
     if (pack.items.empty()) return fail(Msg::VersionUnreadable);
     pack.movedOver = !version.fits;
     pack.notMoved = std::move(notMoved);

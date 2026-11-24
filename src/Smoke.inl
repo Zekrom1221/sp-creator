@@ -13,6 +13,7 @@
 #include <Geode/cocos/support/zip_support/ZipUtils.h>
 #include <Geode/utils/file.hpp>
 
+#include "Disk.hpp"
 #include "SPList.hpp"
 #include "Transfer.hpp"
 
@@ -229,12 +230,12 @@ int firstRunHits(float from, float to) {
 }
 
 std::filesystem::path smokeTestPath(std::string_view state) {
-    return Mod::get()->getSaveDir() / fmt::format("smoketest{}.json", state);
+    return disk::saveDir() / fmt::format("smoketest{}.json", state);
 }
 
 std::vector<RefRow> loadReference(std::filesystem::path const& path) {
     std::vector<RefRow> rows;
-    auto res = geode::utils::file::readString(path);
+    auto res = disk::readString(path);
     if (!res) {
         log::error("Smoke test: reference {}: {}", path, res.unwrapErr());
         return rows;
@@ -379,7 +380,7 @@ void startSmokeTest() {
     auto path = smokeTestPath("");
     std::error_code ec;
     if (g_smoke.active || !std::filesystem::exists(path, ec)) return;
-    auto res = geode::utils::file::readJson(path);
+    auto res = disk::readJson(path);
     std::filesystem::rename(path, smokeTestPath(".done"), ec);
     if (!res) {
         log::error("smoketest.json: {}", res.unwrapErr());
@@ -433,7 +434,7 @@ void startSmokeTest() {
     g_smoke.importFrom = root["import_from"].asString().unwrapOr("");
     g_smoke.checkSaved = root["check_saved"].asBool().unwrapOr(false);
     if (root["storage_ui"].asBool().unwrapOr(false)) {
-        auto dir = Mod::get()->getSaveDir();
+        auto dir = disk::saveDir();
         auto name = root["storage_root"].asString().unwrapOr("");
         auto from = root["storage_from"].asString().unwrapOr("levels");
         // Its copy is deleted from: never a root the player's SPs are in.
@@ -613,7 +614,7 @@ char const* asideKind(storage::AsideFor why) {
 // SPs (forced: they're the same SPs), and the next attempts start from the imported ones.
 void smokeTransfer() {
     auto& t = g_smoke;
-    auto dir = Mod::get()->getSaveDir();
+    auto dir = disk::saveDir();
     auto path = dir / t.exportTo;
     int packed = 0;
     auto exported = transfer::pack(g_session.sps, packed);
@@ -622,7 +623,7 @@ void smokeTransfer() {
         return;
     }
     auto const& bytes = exported.unwrap();
-    auto written = file::writeBinarySafe(path, bytes);
+    auto written = disk::writeBinarySafe(path, bytes);
     log::info("Smoke test: exported {} of {} SPs to {}: {} KB, written {}", packed, g_session.sps.size(), path,
         bytes.size() / 1024, written.isOk());
     auto check = [](std::string_view what, std::filesystem::path const& file) -> std::optional<transfer::Pack> {
@@ -645,7 +646,7 @@ void smokeTransfer() {
         if (raw.isErr()) return log::error("Smoke test: no variant {}: {}", what, raw.unwrapErr());
         change(raw.unwrap());
         auto file = dir / "smoke-variant.spcreator";
-        (void)file::writeBinary(file, transfer::join(raw.unwrap()));
+        (void)disk::writeBinary(file, transfer::join(raw.unwrap()));
         check(what, file);
     };
     variant("another level", [](transfer::Raw& r) { r.manifest["level"]["key"] = "online-1"; });
@@ -683,7 +684,7 @@ void smokeTransfer() {
         auto file = dir / "smoke-variant.spcreator";
         ByteVector cut(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(bytes.size() * keep));
         if (keep == 0.0) cut.assign(4096, 0x41);
-        (void)file::writeBinary(file, cut);
+        (void)disk::writeBinary(file, cut);
         check(what, file);
     }
     {
@@ -693,7 +694,7 @@ void smokeTransfer() {
         deep.insert(deep.end(), reinterpret_cast<uint8_t*>(&size), reinterpret_cast<uint8_t*>(&size) + 4);
         deep.insert(deep.end(), size, '[');
         auto file = dir / "smoke-variant.spcreator";
-        (void)file::writeBinary(file, deep);
+        (void)disk::writeBinary(file, deep);
         check("pack.json nested deep", file);
     }
     std::error_code ec;
@@ -707,7 +708,7 @@ void smokeTransfer() {
     auto versions = [] {
         std::vector<std::string> list;
         for (auto const& v : storage::versions()) {
-            list.push_back(fmt::format("{}{}: {} SPs, {} KB, {}{}", utils::string::pathToString(v.dir.filename()),
+            list.push_back(fmt::format("{}{}: {} SPs, {} KB, {}{}", disk::pathString(v.dir.filename()),
                 v.name.empty() ? "" : fmt::format(" \"{}\"", v.name), v.sps, v.bytes / 1024, asideKind(v.why),
                 v.fits ? "" : ", doesn't fit"));
         }
@@ -772,10 +773,10 @@ void smokeTransfer() {
         for (auto it = std::filesystem::directory_iterator(newest.front().dir, ec3); !ec3 && it != std::filesystem::directory_iterator();
              it.increment(ec3)) {
             if (it->path().extension() != ".spc") continue;
-            auto bytes = file::readBinary(it->path());
+            auto bytes = disk::readBinary(it->path());
             if (bytes.isOk() && !bytes.unwrap().empty()) {
                 bytes.unwrap()[bytes.unwrap().size() / 2] ^= 0x5a;
-                (void)file::writeBinary(it->path(), bytes.unwrap());
+                (void)disk::writeBinary(it->path(), bytes.unwrap());
                 log::info("Smoke test: damaged {} of {}", it->path().filename(), newest.front().dir.filename());
             }
             break;
@@ -790,7 +791,7 @@ void smokeTransfer() {
     std::filesystem::create_directories(old, ec2);
     auto identity = level->identity;
     identity["version"] = identity["version"].asInt().unwrapOr(0) + 1;
-    (void)file::writeString(old / "level.json", identity.dump());
+    (void)disk::writeString(old / "level.json", identity.dump());
     for (auto it = std::filesystem::directory_iterator(list.front().dir, ec2); !ec2 && it != std::filesystem::directory_iterator();
          it.increment(ec2)) {
         if (it->path().extension() == ".spc") {
@@ -827,7 +828,7 @@ void smokeCheckSaved() {
             if (auto files = storage::readVersion(v); files.isOk()) {
                 for (auto const& f : files.unwrap()) names.push_back(fmt::format("\"{}\"", f.name));
             }
-            list.push_back(fmt::format("{} \"{}\": {} SPs [{}]{}", utils::string::pathToString(v.dir.filename()), v.name, v.sps,
+            list.push_back(fmt::format("{} \"{}\": {} SPs [{}]{}", disk::pathString(v.dir.filename()), v.name, v.sps,
                 fmt::join(names, ", "), v.fits ? "" : ", doesn't fit"));
         }
         return fmt::format("SPs [{}], versions {} [{}]", fmt::join(sps, ", "), list.size(), fmt::join(list, "; "));
@@ -848,7 +849,7 @@ void smokeCheckSaved() {
 
 // At the level start: SPs from a file, as on another computer.
 void smokeImport() {
-    auto path = Mod::get()->getSaveDir() / g_smoke.importFrom;
+    auto path = disk::saveDir() / g_smoke.importFrom;
     auto pack = transfer::open(path);
     if (pack.isErr()) return log::error("Smoke test: import of {} refused: {}", path, pack.unwrapErr());
     std::vector<bool> picked;
@@ -894,8 +895,8 @@ void captureScreen(std::string const& name) {
     OverlayManager::get()->visit();
     rt->end();
     auto image = rt->newCCImage(true);
-    auto path = Mod::get()->getSaveDir() / name;
-    bool ok = image && image->saveToFile(utils::string::pathToString(path).c_str(), false);
+    auto path = disk::saveDir() / name;
+    bool ok = image && image->saveToFile(disk::pathString(path).c_str(), false);
     CC_SAFE_RELEASE(image);
     log::info("Smoke test: screen saved to {}: {}", path, ok);
 }
@@ -1056,7 +1057,7 @@ void smokeUI(int stage) {
         case 7: {
             captureScreen("smoke-export.png");
             // The SPs of an earlier test, placed at the same x: close to these, or the same.
-            auto pack = transfer::open(Mod::get()->getSaveDir() / "smoke-export.spcreator");
+            auto pack = transfer::open(disk::saveDir() / "smoke-export.spcreator");
             if (pack.isOk()) splist::openImport(std::move(pack).unwrap());
             else log::warn("Smoke test: no import list: {}", pack.unwrapErr());
             return next();
@@ -1196,9 +1197,9 @@ std::string describeStorage() {
 std::vector<std::string> storageFolders(std::string const& name = g_smoke.storageRoot) {
     std::vector<std::string> names;
     std::error_code ec;
-    auto root = Mod::get()->getSaveDir() / name;
+    auto root = disk::saveDir() / name;
     for (auto it = std::filesystem::directory_iterator(root, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
-        names.push_back(utils::string::pathToString(it->path().filename()));
+        names.push_back(disk::pathString(it->path().filename()));
     }
     std::sort(names.begin(), names.end());
     return names;
@@ -1378,10 +1379,10 @@ void smokeProbe(PlayLayer* pl) {
             seen.empty() ? std::string() : fmt::format(", {} to {}", seen.front(), seen.back()), refs.states.size());
         dump[fmt::to_string(id)] = std::move(list);
     }
-    auto res = file::writeString(Mod::get()->getSaveDir() / "smoke-refs.json", dump.dump());
+    auto res = disk::writeString(disk::saveDir() / "smoke-refs.json", dump.dump());
     if (res.isErr()) log::error("Smoke test: probe: {}", res.unwrapErr());
     // For picking objects to delete.
-    (void)file::writeString(Mod::get()->getSaveDir() / "smoke-level.txt", raw);
+    (void)disk::writeString(disk::saveDir() / "smoke-level.txt", raw);
 }
 
 // The version for the level before the update, taken back the Versions list's way, in place of the SPs
@@ -1553,10 +1554,10 @@ void smokeDescribe(std::string const& tag) {
     uintmax_t bytes = 0;
     if (auto level = storage::level()) {
         key = level->key;
-        auto dir = Mod::get()->getSaveDir() / g_smoke.storageRoot / level->key;
+        auto dir = disk::saveDir() / g_smoke.storageRoot / level->key;
         std::error_code ec;
         for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
-            files.push_back(utils::string::pathToString(it->path().filename()));
+            files.push_back(disk::pathString(it->path().filename()));
             std::error_code ec2;
             bytes += it->file_size(ec2);
             // Not compressed: of before SP files were.
@@ -1565,13 +1566,13 @@ void smokeDescribe(std::string const& tag) {
             older += std::string_view(magic, sizeof(magic)) == "SPCREATR";
         }
         std::sort(files.begin(), files.end());
-        if (auto res = file::readString(dir / "names.json"); res.isOk()) {
+        if (auto res = disk::readString(dir / "names.json"); res.isOk()) {
             names = res.unwrap();
             std::erase_if(names, [](char c) { return c == '\n' || c == '\r'; });
         }
     }
     for (auto const& v : storage::versions()) {
-        versions.push_back(fmt::format("{} \"{}\" {} SPs{}{}", utils::string::pathToString(v.dir.filename()), v.name, v.sps,
+        versions.push_back(fmt::format("{} \"{}\" {} SPs{}{}", disk::pathString(v.dir.filename()), v.name, v.sps,
             v.fits ? "" : " (doesn't fit)", v.movable ? " (movable)" : ""));
     }
     log::info("Smoke test: STATE {}: root {}, level {}, {} SPs [{}], active {}, files [{}] ({} KB, {} not compressed), "
@@ -2091,7 +2092,7 @@ void nextAction() {
         return next();
     }
     if (op == "open") {
-        auto path = Mod::get()->getSaveDir() / std::filesystem::path(utils::string::utf8ToWide(args.empty() ? "" : args[0]));
+        auto path = disk::saveDir() / std::filesystem::path(utils::string::utf8ToWide(args.empty() ? "" : args[0]));
         auto pack = transfer::open(path);
         if (pack.isErr()) {
             log::info("Smoke test: OPEN {}: refused: {}", args.empty() ? "" : args[0], pack.unwrapErr());
@@ -2532,9 +2533,9 @@ void nextAction() {
         auto level = storage::level();
         if (i < sps.size() && level) {
             core::saveAll();
-            auto path = Mod::get()->getSaveDir() / t.storageRoot / level->key / fmt::format("sp-{}.spc", sps[i]->id);
-            auto bytes = file::readBinary(path);
-            auto res = bytes.isOk() ? file::writeBinary(path, storage::variantOf(bytes.unwrap(), how))
+            auto path = disk::saveDir() / t.storageRoot / level->key / fmt::format("sp-{}.spc", sps[i]->id);
+            auto bytes = disk::readBinary(path);
+            auto res = bytes.isOk() ? disk::writeBinary(path, storage::variantOf(bytes.unwrap(), how))
                                     : Result<>(Err(bytes.unwrapErr()));
             log::info("Smoke test: SP {} file {}: {}", sps[i]->id, how, res.isOk() ? "written" : res.unwrapErr());
         }

@@ -1,5 +1,7 @@
 #include "Storage.hpp"
 
+#include "Disk.hpp"
+
 #include <Geode/utils/file.hpp>
 #include <Geode/utils/string.hpp>
 
@@ -351,7 +353,7 @@ bool writePrints(std::filesystem::path const& path, std::vector<ObjectPrint> con
     }
     uint64_t seal = hashBytes(bytes.data(), at - bytes.data());
     put(&seal, sizeof(seal));
-    auto res = file::writeBinarySafe(path, bytes);
+    auto res = disk::writeBinarySafe(path, bytes);
     if (res.isErr()) log::error("Can't write {}: {}", path, res.unwrapErr());
     return res.isOk();
 }
@@ -360,7 +362,7 @@ bool writePrints(std::filesystem::path const& path, std::vector<ObjectPrint> con
 std::vector<ObjectPrint> readPrints(std::filesystem::path const& path) {
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) return {};
-    auto data = file::readBinary(path);
+    auto data = disk::readBinary(path);
     if (data.isErr()) return {};
     auto const& bytes = data.unwrap();
     if (bytes.size() < printsFileSize(0) || std::memcmp(bytes.data(), PRINTS_MAGIC, sizeof(PRINTS_MAGIC)) != 0) return {};
@@ -439,7 +441,7 @@ void keepPrints() {
 void readNames(std::vector<std::shared_ptr<StartPoint>> const& sps) {
     std::error_code ec;
     if (!std::filesystem::exists(namesPath(), ec)) return;
-    auto res = file::readJson(namesPath());
+    auto res = disk::readJson(namesPath());
     if (res.isErr() || !res.unwrap().isObject()) {
         log::warn("Can't read {}: {}", namesPath(), res.isErr() ? res.unwrapErr() : std::string("not an object"));
         return;
@@ -821,7 +823,7 @@ std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, ui
     kind = ReadError::Other;
     // PersistenceAPI checks nothing it reads, so the whole file is checked against its seal first (and a
     // compressed one unpacked): past that it isn't cut off or changed since it was sealed.
-    auto data = file::readBinary(path);
+    auto data = disk::readBinary(path);
     if (data.isErr()) {
         error = fmt::format("can't read it: {}", data.unwrapErr());
         return nullptr;
@@ -860,13 +862,13 @@ void compressOlder(std::filesystem::path const& dir) {
         char magic[sizeof(MAGIC)] = {};
         std::ifstream(path, std::ios::binary).read(magic, sizeof(magic));
         if (std::memcmp(magic, MAGIC, sizeof(MAGIC)) != 0) continue;
-        auto data = file::readBinary(path);
+        auto data = disk::readBinary(path);
         std::string error = data.isErr() ? data.unwrapErr() : "";
         auto file = data.isOk() ? keptFile(data.unwrap(), error) : std::nullopt;
         // Kept as it is (see compress()).
         if (file && std::ranges::equal(*file, data.unwrap())) continue;
         if (file) {
-            if (auto res = file::writeBinarySafe(path, *file); res.isErr()) error = res.unwrapErr();
+            if (auto res = disk::writeBinarySafe(path, *file); res.isErr()) error = res.unwrapErr();
             else {
                 done++;
                 before += data.unwrap().size();
@@ -996,7 +998,7 @@ int dropStandIns(CheckpointObject* cp, std::set<GameObject*> const& standIns) {
 // The percent in an SP file as written, NaN if it can't be read: for telling the player which SP it was.
 float percentIn(std::filesystem::path const& path) {
     float percent = NAN;
-    auto bytes = file::readBinary(path);
+    auto bytes = disk::readBinary(path);
     if (bytes.isOk() && bytes.unwrap().size() >= PERCENT_AT + sizeof(percent)) {
         std::memcpy(&percent, bytes.unwrap().data() + PERCENT_AT, sizeof(percent));
     }
@@ -1021,7 +1023,7 @@ struct OtherVersion {
 OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
     OtherVersion out;
     RealObjects real;
-    auto info = file::readJson(dir / "level.json");
+    auto info = disk::readJson(dir / "level.json");
     if (!g_remapHook || g_level.prints.empty() || info.isErr() || !sameGame(info.unwrap(), g_level.info)) return out;
     auto old = readPrints(dir / PRINTS_FILE);
     if (old.empty() || static_cast<int64_t>(old.size()) != info.unwrap()["objects"].asInt().unwrapOr(-1)) return out;
@@ -1056,7 +1058,7 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
         if (int id = idFromName(it->path()); id > 0) files.push_back({id, it->path()});
     }
     std::sort(files.begin(), files.end());
-    auto names = file::readJson(dir / "names.json").unwrapOr(matjson::Value::object());
+    auto names = disk::readJson(dir / "names.json").unwrapOr(matjson::Value::object());
     if (!names.isObject()) names = matjson::Value::object();
     uint64_t stamp = levelStamp(g_level.plainKey, info.unwrap());
     RemapOn on(pl, array, std::move(standing));
@@ -1092,7 +1094,7 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
 // Could readOtherVersion() move SPs of `dir` over, as far as can be told without reading them?
 bool canMoveOver(std::filesystem::path const& dir) {
     if (!g_remapHook || g_level.prints.empty()) return false;
-    auto info = file::readJson(dir / "level.json");
+    auto info = disk::readJson(dir / "level.json");
     if (info.isErr() || !sameGame(info.unwrap(), g_level.info)) return false;
     auto count = info.unwrap()["objects"].asInt().unwrapOr(-1);
     std::error_code ec;
@@ -1109,7 +1111,7 @@ bool moveLowDetailSPs(PlayLayer* pl, std::filesystem::path const& root, std::str
     auto low = root / (key + std::string(LOW_DETAIL_SUFFIX));
     std::error_code ec;
     if (std::filesystem::exists(low, ec) || !std::filesystem::exists(plain / "level.json", ec)) return true;
-    auto saved = file::readJson(plain / "level.json");
+    auto saved = disk::readJson(plain / "level.json");
     if (saved.isErr()) return true;
     auto lowInfo = info;
     if (!lowDetail(pl)) {
@@ -1208,9 +1210,9 @@ std::vector<storage::Version> versionsOf(std::filesystem::path const& dir, matjs
             if (!ec3) v.bytes += size;
             if (idFromName(f->path()) > 0) v.sps++;
         }
-        auto saved = file::readJson(v.dir / "level.json");
+        auto saved = disk::readJson(v.dir / "level.json");
         v.fits = saved.isOk() && sameLevel(saved.unwrap(), info);
-        if (auto meta = file::readJson(v.dir / VERSION_FILE); meta.isOk()) {
+        if (auto meta = disk::readJson(v.dir / VERSION_FILE); meta.isOk()) {
             auto given = meta.unwrap()["name"].asString().unwrapOr("");
             if (given.size() <= MAX_NAME_BYTES) v.name = std::move(given);
         }
@@ -1344,7 +1346,7 @@ Loaded load(PlayLayer* pl) {
         return out;
     }
 
-    auto root = Mod::get()->getSaveDir() / g_root;
+    auto root = disk::saveDir() / g_root;
     auto dir = root / key;
     auto info = identity(pl);
     if (!moveLowDetailSPs(pl, root, plainKey, info)) {
@@ -1355,10 +1357,10 @@ Loaded load(PlayLayer* pl) {
     std::error_code ec;
     std::filesystem::path oldVersion;  // the SPs of another version of the level, set aside in it
     if (std::filesystem::exists(infoPath, ec)) {
-        auto saved = file::readJson(infoPath);
+        auto saved = disk::readJson(infoPath);
         if ((saved.isErr() || !sameLevel(saved.unwrap(), info)) && !hasSPFiles(dir)) {
             // Played before without SPs: nothing to keep, the folder is this version's now.
-            auto res = file::writeStringSafe(infoPath, info.dump());
+            auto res = disk::writeStringSafe(infoPath, info.dump());
             if (res.isErr()) {
                 log::error("Can't write {}: {}", infoPath, res.unwrapErr());
                 return out;
@@ -1385,7 +1387,7 @@ Loaded load(PlayLayer* pl) {
     }
     std::filesystem::create_directories(dir, ec);
     if (!std::filesystem::exists(infoPath, ec)) {
-        auto res = file::writeStringSafe(infoPath, info.dump());
+        auto res = disk::writeStringSafe(infoPath, info.dump());
         if (res.isErr()) {
             log::error("Can't write {}: {}", infoPath, res.unwrapErr());
             return out;
@@ -1508,7 +1510,7 @@ bool writeSPFile(StartPoint const& sp, std::filesystem::path const& path) {
     // Written in full (to path.tmp, which load() deletes if a crash leaves it), then put in place: a crash
     // while saving leaves no damaged SP behind.
     if (file.isOk()) {
-        if (auto res = file::writeBinarySafe(path, file.unwrap()); res.isErr()) file = Err(res.unwrapErr());
+        if (auto res = disk::writeBinarySafe(path, file.unwrap()); res.isErr()) file = Err(res.unwrapErr());
     }
     if (file.isErr()) {
         log::error("Can't save SP {} to {}: {}", sp.id, path, file.unwrapErr());
@@ -1537,10 +1539,9 @@ void numberObject(PlayLayer* pl, GameObject* obj) {
 }
 
 GameObject* createKeepingIds(int key) {
-    auto counter = reinterpret_cast<int*>(geode::base::get() + UNIQUE_ID_COUNTER);
-    int next = *counter;
+    int next = idCounter();
     auto obj = GameObject::createWithKey(key);
-    *counter = next;
+    idCounter() = next;
     return obj;
 }
 
@@ -1549,7 +1550,7 @@ std::vector<float> peekPositions(PlayLayer* pl) {
     auto plainKey = levelKey(pl);
     if (plainKey.empty()) return out;
     auto key = lowDetail(pl) ? plainKey + std::string(LOW_DETAIL_SUFFIX) : plainKey;
-    auto dir = Mod::get()->getSaveDir() / g_root / key;
+    auto dir = disk::saveDir() / g_root / key;
     std::error_code ec;
     for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator();
          it.increment(ec)) {
@@ -1620,7 +1621,7 @@ void saveNames(std::vector<std::shared_ptr<StartPoint>> const& sps) {
     for (auto const& sp : sps) {
         if (!sp->name.empty()) names[fmt::to_string(sp->id)] = sp->name;
     }
-    auto res = file::writeStringSafe(namesPath(), names.dump());
+    auto res = disk::writeStringSafe(namesPath(), names.dump());
     if (res.isErr()) log::error("Can't write {}: {}", namesPath(), res.unwrapErr());
 }
 
@@ -1643,7 +1644,7 @@ bool fits(matjson::Value const& identity) {
 
 Result<ByteVector> fileOf(StartPoint const& sp) {
     if (g_level.dir.empty()) return Err("SPs of this level aren't saved");
-    return file::readBinary(spPath(sp.id));
+    return disk::readBinary(spPath(sp.id));
 }
 
 Result<Header> readHeader(ByteSpan bytes) {
@@ -1695,7 +1696,7 @@ std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files,
         std::shared_ptr<StartPoint> sp;
         // Read back the way load() reads it, and in place only if that worked.
         auto kept = keptFile(bytes, error);
-        auto written = kept ? file::writeBinary(temp, *kept) : Result<>(Err(error));
+        auto written = kept ? disk::writeBinary(temp, *kept) : Result<>(Err(error));
         if (written.isErr()) {
             error = written.unwrapErr();
         } else {
@@ -1743,7 +1744,7 @@ std::optional<Version> sameVersion(std::vector<std::shared_ptr<StartPoint>> cons
     };
     std::vector<Entry> own;
     for (auto const& sp : sps) {
-        auto bytes = file::readBinary(spPath(sp->id));
+        auto bytes = disk::readBinary(spPath(sp->id));
         auto entry = bytes.isOk() ? entryOf(bytes.unwrap(), sp->name) : std::nullopt;
         if (!entry) return std::nullopt;
         own.push_back(std::move(*entry));
@@ -1826,7 +1827,7 @@ Aside setAside(std::vector<std::shared_ptr<StartPoint>> const& sps, AsideFor why
         std::filesystem::remove_all(aside, ec);
         return out;
     }
-    auto res = file::writeStringSafe(aside / "names.json", names.dump());
+    auto res = disk::writeStringSafe(aside / "names.json", names.dump());
     if (res.isErr()) log::error("Can't write names into {}: {}", aside, res.unwrapErr());
     return out;
 }
@@ -1957,7 +1958,7 @@ std::vector<References> referencesOfSPs() {
 Result<std::vector<VersionSP>> readVersion(Version const& version) {
     if (!isVersionOfLevel(version.dir)) return Err("not a version of this level");
     if (!version.fits) return Err("made for another level version");
-    auto names = file::readJson(version.dir / "names.json").unwrapOr(matjson::Value::object());
+    auto names = disk::readJson(version.dir / "names.json").unwrapOr(matjson::Value::object());
     std::vector<std::pair<int, VersionSP>> found;
     std::error_code ec;
     for (auto it = std::filesystem::directory_iterator(version.dir, ec); !ec && it != std::filesystem::directory_iterator();
@@ -1965,7 +1966,7 @@ Result<std::vector<VersionSP>> readVersion(Version const& version) {
         int id = idFromName(it->path());
         std::error_code ec2;
         if (id == 0 || it->file_size(ec2) > MAX_FILE_SIZE) continue;
-        auto bytes = file::readBinary(it->path());
+        auto bytes = disk::readBinary(it->path());
         if (bytes.isErr()) {
             log::error("Version {}: can't read {}: {}", version.dir, it->path().filename(), bytes.unwrapErr());
             continue;
@@ -2006,7 +2007,7 @@ bool renameVersion(Version const& version, std::string const& name) {
     }
     auto meta = matjson::Value::object();
     meta["name"] = name;
-    auto res = file::writeStringSafe(path, meta.dump());
+    auto res = disk::writeStringSafe(path, meta.dump());
     if (res.isErr()) log::error("Can't write {}: {}", path, res.unwrapErr());
     return res.isOk();
 }
@@ -2025,7 +2026,7 @@ void removeAll() {
 namespace {
 
 std::filesystem::path rootDir() {
-    return Mod::get()->getSaveDir() / g_root;
+    return disk::saveDir() / g_root;
 }
 
 // Nothing in the folder but what the mod writes on its own: no SP files, nothing else of the player's.
@@ -2095,7 +2096,7 @@ std::vector<StoredLevel> storedLevels() {
         level.dir = root / std::filesystem::path(std::u8string(key.begin(), key.end()));
         level.lowDetail = key.ends_with(LOW_DETAIL_SUFFIX);
         level.open = isOpenLevel(key, level.dir);
-        auto info = file::readJson(level.dir / "level.json");
+        auto info = disk::readJson(level.dir / "level.json");
         std::error_code ec2;
         // Without SPs in it, it holds what the mod writes on entering the level: nothing to free.
         bool own = std::filesystem::is_directory(level.dir, ec2) && !onlyModFiles(level.dir);
@@ -2119,7 +2120,7 @@ std::vector<StoredLevel> storedLevels() {
         if (info.isOk()) level.name = info.unwrap()["name"].asString().unwrapOr("");
         for (auto const& v : level.versions) {
             if (!level.name.empty()) break;
-            if (auto saved = file::readJson(v.dir / "level.json"); saved.isOk()) level.name = saved.unwrap()["name"].asString().unwrapOr("");
+            if (auto saved = disk::readJson(v.dir / "level.json"); saved.isOk()) level.name = saved.unwrap()["name"].asString().unwrapOr("");
         }
         if (level.name.empty()) level.name = key;
         if (own || !level.versions.empty()) out.push_back(std::move(level));

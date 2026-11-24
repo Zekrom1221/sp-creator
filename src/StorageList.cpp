@@ -5,6 +5,7 @@
 #include <set>
 
 #include "Core.hpp"
+#include "Disk.hpp"
 #include "Storage.hpp"
 #include "StorageList.hpp"
 #include "Text.hpp"
@@ -207,7 +208,7 @@ protected:
     }
 
     static std::string nameOf(storage::Version const& v) {
-        return utils::string::pathToString(v.dir.filename());
+        return disk::pathString(v.dir.filename());
     }
 
     bool hasOwn() const {
