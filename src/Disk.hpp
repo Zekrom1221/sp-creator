@@ -25,6 +25,7 @@ namespace disk {
     geode::Result<> writeBinarySafe(std::filesystem::path const& path, geode::ByteSpan data);
     geode::Result<> writeStringSafe(std::filesystem::path const& path, std::string_view data);
 
-    // As UTF-8 text.
+    // As UTF-8 text, and back.
     std::string pathString(std::filesystem::path const& path);
+    std::filesystem::path pathFromString(std::string const& utf8);
 }

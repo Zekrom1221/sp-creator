@@ -99,7 +99,7 @@ struct SmokeTest {
     matjson::Value update;
     bool updated = false;
     bool keepUpdate = false;
-    gd::string realLevelString;
+    std::string realLevelString;
     int realLevelVersion = 0;
     bool probe = false;
     bool moveVersion = false;
@@ -117,7 +117,7 @@ struct SmokeTest {
     // "resave": a level's string and version before the editor first saved it, given back at the end.
     struct Resaved {
         Ref<GJGameLevel> level;
-        gd::string string;
+        std::string string;
         int version = 0;
     };
     std::optional<Resaved> beforeResave;
@@ -353,7 +353,7 @@ void smokeUpdate(GJGameLevel* level, matjson::Value const& update) {
     t.updated = true;
     // "keep": the level stays updated till the end of the test (entered again, it's still so).
     t.keepUpdate = update["keep"].asBool().unwrapOr(false);
-    level->m_levelString = ZipUtils::compressString(joined, false, 0);
+    level->m_levelString = ZipUtils::compressString(joined, false, 6, 0);
     if (update["bump"].asBool().unwrapOr(true)) level->m_levelVersion += 1;
     log::info("Smoke test: update: {} objects -> {}, version {} -> {}", objects.size(), kept.size(), t.realLevelVersion,
         level->m_levelVersion);
@@ -464,7 +464,7 @@ void startSmokeTest() {
         "block input {}, auto part {:.2f} s", id, level->m_levelName, level->m_stars.value(), g_smoke.placeAtX.size(),
         g_smoke.reference.size(), g_smoke.cleanup, text::russian(), g_smoke.actions.size(),
         Mod::get()->getSettingValue<bool>("block-input"), autoPartSeconds());
-    CCDirector::get()->replaceScene(PlayLayer::scene(level, false, false));
+    CCDirector::get()->replaceScene(PlayLayer::scene(level, false));
 }
 
 constexpr char const* CAPELING_SWITCHER = "capeling.startpos_switcher";
@@ -477,9 +477,7 @@ void foreignSwitch(PlayLayer* pl, int dir) {
         return;
     }
     StartPosObject* obj = dir > 0 && !g_session.sps.empty() ? g_session.sps.front()->object.data() : nullptr;
-    pl->m_isTestMode = obj != nullptr;
-    setCurrentCheckpoint(pl, nullptr);
-    pl->setStartPosObject(obj);
+    pl->setActiveStartPosObject(obj);
     pl->resetLevel();
 }
 
@@ -487,7 +485,7 @@ void logRestart(PlayLayer* pl, std::string_view what) {
     auto sp = spOf(pl->m_startPosObject);
     log::info("Smoke test: {}: {}, startpos {}, our checkpoint {}, auto part {}, test mode {}, percent {:.3f}{}", what,
         activeLabel(), sp ? fmt::format("of SP {}", sp->id) : (pl->m_startPosObject ? "of the level" : "none"),
-        g_session.active && pl->m_currentCheckpoint == g_session.active->cp ? "loaded" : "not loaded",
+        g_session.active && currentCheckpoint(pl) == g_session.active->cp ? "loaded" : "not loaded",
         g_play.sp ? fmt::format("of SP {}", g_play.sp->id) : "none", pl->m_isTestMode, pl->getCurrentPercent(),
         sp ? fmt::format(" (the SP's {:.3f}, by the level's time {:.3f})", sp->percent, startPosPercent(pl, objectPosition(*sp).x))
             : pl->m_startPosObject ? fmt::format(" (by the level's time {:.3f})", startPosPercent(pl, pl->m_startPosObject->getPositionX()))
@@ -548,14 +546,13 @@ bool smokeCompat(PlayLayer* pl) {
             log::info("Smoke test: that attempt, x {:.1f} to {:.1f}: {} hits, original run {}", t.phaseStartX,
                 pl->m_player1->m_position.x, g_rec.hits, firstRunHits(t.phaseStartX, pl->m_player1->m_position.x));
             // An SP placed now goes first at the next restart, unless another switcher picks a startpos before
-            // it, even the one it's on now: the way capeling's does, nulling the checkpoint without a release.
+            // it, even the one it's on now (as the game's own switching does it, setActiveStartPosObject).
             if (sps.size() >= 2 && pl->m_startPosObject == sps.front()->object) {
                 CheckpointObject* cp = sps.front()->cp;  // not a Ref: it would add a retain
                 unsigned int before = cp->retainCount();
                 choose(sps.back());
-                pl->m_currentCheckpoint = nullptr;
-                pl->setStartPosObject(sps.front()->object);
-                pl->m_isTestMode = true;
+                pl->setActiveStartPosObject(nullptr);
+                pl->setActiveStartPosObject(sps.front()->object);
                 pl->resetLevel();
                 logRestart(pl, "another switcher picks the startpos it was on, an SP placed before");
                 log::info("Smoke test: retains of that SP's checkpoint: {} before, {} after", before, cp->retainCount());
@@ -1495,7 +1492,7 @@ void nextSmokePhase() {
             deleteSP();
             log::info("Smoke test: after deleting: {} SPs, {}, player at x {:.1f}, our checkpoint {}", g_session.sps.size(),
                 activeLabel(), pl->m_player1->m_position.x,
-                g_session.active && pl->m_currentCheckpoint == g_session.active->cp ? "loaded" : "not loaded");
+                g_session.active && currentCheckpoint(pl) == g_session.active->cp ? "loaded" : "not loaded");
         }
         // capeling's switcher keeps the deleted SPs' objects: its next one is the first SP, deleted now.
         if (Loader::get()->getLoadedMod(CAPELING_SWITCHER)) {
@@ -1617,7 +1614,7 @@ void smokeEnter(GJGameLevel* level) {
     if (auto pl = PlayLayer::get()) pl->onQuit();
     afterFrames(150, [] {
         log::info("Smoke test: entering \"{}\"", g_smoke.level->m_levelName);
-        CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false, false));
+        CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false));
     });
 }
 
@@ -1647,12 +1644,12 @@ void smokeResave(bool edit) {
                 log::info("Smoke test: resave: object {} (ID {}) moved up", 10, obj->m_objectID);
             }
             // As EditorPauseLayer::saveLevel writes it, in memory only: that one writes CCLocalLevels.dat too.
-            gd::string before = g_smoke.level->m_levelString;
-            g_smoke.level->m_levelString = ZipUtils::compressString(editor->getLevelString(), false, 0);
+            std::string before = g_smoke.level->m_levelString;
+            g_smoke.level->m_levelString = ZipUtils::compressString(editor->getLevelString(), false, 6, 0);
             log::info("Smoke test: resave: the level's string {} ({} -> {} bytes), {} objects; save and play",
                 before == g_smoke.level->m_levelString ? "the same" : "written anew", before.size(),
                 g_smoke.level->m_levelString.size(), editor->m_objects->count());
-            CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false, false));
+            CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false));
         });
     });
 }
@@ -2248,7 +2245,7 @@ void nextAction() {
         }
         auto startPos = pl->m_startPosObject;
         auto sp = spOf(startPos);
-        auto cp = pl->m_currentCheckpoint;
+        auto cp = currentCheckpoint(pl);
         log::info("Smoke test: SWITCHER {}: [{}], startpos {}, test mode {}, checkpoint {}, practice {} ({} checkpoints), "
             "player x {:.1f}, auto part {}, SP list row {}, notice \"{}\"", rest, fmt::join(items, "; "),
             sp ? fmt::format("of SP {}", sp->id)
@@ -2294,9 +2291,7 @@ void nextAction() {
             log::error("Smoke test: no startpos {} of the level", i);
             return next();
         }
-        pl->m_isTestMode = true;
-        setCurrentCheckpoint(pl, nullptr);
-        pl->setStartPosObject(level[i].object);
+        pl->setActiveStartPosObject(level[i].object);
         pl->resetLevel();
         logRestart(pl, fmt::format("the level's startpos {} at x {:.0f}", i, level[i].x));
         return next();
@@ -3138,7 +3133,7 @@ std::string commandText(GroupCommandObject2 const& c) {
 void dumpCommands(PlayLayer* pl, std::string_view tag, int group) {
     auto em = pl->m_effectManager;
     int count = 0;
-    auto live = [&](std::string_view where, gd::vector<GroupCommandObject2*> const& v) {
+    auto live = [&](std::string_view where, std::vector<GroupCommandObject2*> const& v) {
         for (auto c : v) {
             if (!c || c->m_targetGroupID != group) continue;
             count++;

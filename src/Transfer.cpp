@@ -87,7 +87,7 @@ constexpr char const* LAST_FOLDER = "file-folder";
 
 // Where the file dialogs open: the folder of the file last picked, or Downloads.
 std::filesystem::path startFolder() {
-    auto last = Mod::get()->getSavedValue<std::filesystem::path>(LAST_FOLDER);
+    auto last = disk::pathFromString(Mod::get()->getSavedValue<std::string>(LAST_FOLDER));
     std::error_code ec;
     return !last.empty() && std::filesystem::is_directory(last, ec) ? last : defaultFolder();
 }
@@ -426,7 +426,7 @@ bool chooseFile(bool save, std::string const& levelName, geode::Function<void(st
                 log::error("File dialog failed: {:#x}", static_cast<uint32_t>(result));
             }
             if (path && save) path = withExtension(*path);
-            if (path) Mod::get()->setSavedValue(LAST_FOLDER, path->parent_path());
+            if (path) Mod::get()->setSavedValue(LAST_FOLDER, disk::pathString(path->parent_path()));
             then(std::move(path));
         });
     }).detach();

@@ -43,7 +43,7 @@ protected:
     bool initList(std::string const& title) {
         if (!Popup::init(WIDTH, HEIGHT)) return false;
         setGoldTitle(this, title);
-        m_title->limitLabelWidth(WIDTH - 70.f, m_title->getScale(), 0.1f);
+        m_title->setLimitLabelWidth(WIDTH - 70.f, m_title->getScale(), 0.1f);
         m_total = text::label(" ");
         m_total->setColor(NOTE_COLOR);
         m_mainLayer->addChildAtPosition(m_total, Anchor::Top, {0.f, -44.f});
@@ -165,7 +165,7 @@ protected:
     }
 
 public:
-    CCLabelBMFont* titleLabel() { return m_title; }
+    geode::Label* titleLabel() { return m_title; }
     using Popup::setTitle;
 
     void refresh() {

@@ -1,7 +1,7 @@
 {
-    "geode": "5.11.2",
+    "geode": "6.0.0-beta.2",
     "gd": {
-        "win": "2.2081"
+        "win": "2.2091"
     },
     "version": "0.9.0",
     "id": "zekrom.sp-creator",
@@ -16,8 +16,7 @@
         "url": "https://github.com/Zekrom1221/sp-creator/issues"
     },
     "dependencies": {
-        "sabe.persistenceapi": ">=v1.2.0",
-        "geode.node-ids": ">=v1.23.0"
+        "geode.node-ids": ">=v1.24.0-beta.1"
     },
     "resources": {
         "fonts": {

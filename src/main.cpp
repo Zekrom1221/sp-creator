@@ -32,10 +32,10 @@ using text::Msg;
 // - Every SP has a startpos object in the level, added after the level's own objects at the point
 //   where the player takes control. Other mods that look for startposes find the SPs there: startpos
 //   switchers list them, Blitzkrieg makes stages of them.
-// - Starting from an SP goes through the game's own startpos retry path: with a startpos set and
-//   PlayLayer::m_currentCheckpoint filled, resetLevel loads that checkpoint in normal mode. With an SP's
-//   object as the startpos, set by this mod or by another mod's switcher, the mod puts the SP's
-//   checkpoint there, then replays the auto part and hands control to the player.
+// - Starting from an SP goes through the game's own startpos retry path: the game keeps a checkpoint for each
+//   startpos (PlayLayer::m_checkpointsDict, by the startpos's unique ID), and resetLevel loads the one of the
+//   startpos set, in normal mode. With an SP's object as the startpos, set by this mod or by another mod's
+//   switcher, the mod puts the SP's checkpoint there, then replays the auto part and hands control to the player.
 // - Test mode is on for these attempts, so like any startpos attempt they count as attempts but never
 //   save a new best or a completion (destroyPlayer and levelComplete skip progress in test mode).
 
@@ -126,15 +126,13 @@ struct Session {
     StartPosObject* activeLevel = nullptr;         // when `active` is null: the startpos of the level restarts go to
     // `active` was picked by this mod (placing, switching, deleting) since the last restart, and wins at
     // the next one, unless another mod sets a startpos in between.
-    // Another mod's switcher changes the startpos, and nulls m_currentCheckpoint (capeling's does): both are
-    // kept to see that. (setStartPosObject is inlined on Windows: there's no call to catch.)
+    // Another mod's switcher changes the startpos (and may change its checkpoint): both are kept to see that.
+    // (setActiveStartPosObject is inlined on Windows: there's no call to catch.)
     bool chosen = false;
     bool chosenNow = false;                        // for a restart right away: nobody can come in between
     StartPosObject* startPosWhenChosen = nullptr;
     CheckpointObject* checkpointWhenChosen = nullptr;  // only compared
     std::shared_ptr<StartPoint> spawning;          // set during a restart from an SP
-    Ref<CheckpointObject> lastCheckpoint;          // the SP checkpoint the mod last put into the layer
-    unsigned int lastCheckpointRetains = 0;        // its retain count once the attempt started
     bool ownTestMode = false;                      // test mode is on for an attempt from an SP
     // Objects of deleted SPs, out of the level: another mod's switcher may still have one and pick it.
     // New SPs get them first (addObjectFor).
@@ -265,38 +263,20 @@ void timeNotice(std::chrono::steady_clock::time_point now) {
     Loader::get()->queueInMainThread(noticeFrame);
 }
 
-// Notification has its label in bigFont, which has no Cyrillic letters: text that needs the mod's font
-// goes into a label of the mod's beside it, with the notification's own one left empty.
+// Notification has its label in bigFont, which has no Cyrillic letters: text that needs the mod's font gets it
+// (the label is a geode::Label, Geode 6, which takes any font).
 // Long text is made smaller to fit the screen: the notification grows with its label, past the screen's edges.
 // Geode's label scale, and what's left of the notification's width for the label (it has its icon too).
 constexpr float NOTICE_LABEL_SCALE = 0.6f;
 constexpr float NOTICE_ICON_WIDTH = 40.f;
 
 void setNoticeText(Notification* n, std::string const& text) {
-    constexpr auto OWN_LABEL = "text"_spr;
     float maxWidth = CCDirector::get()->getWinSize().width * 0.9f / n->getScale() - NOTICE_ICON_WIDTH;
-    auto own = findFirstChildRecursive<CCLabelBMFont>(n, [&](CCLabelBMFont* l) { return l->getID() == OWN_LABEL; });
-    auto label = findFirstChildRecursive<CCLabelBMFont>(n, [&](CCLabelBMFont* l) { return l->getID() != OWN_LABEL; });
-    auto font = text::fontFor(text);
-    if (std::string_view(font) == "bigFont.fnt") {
-        if (own) own->removeFromParent();
-        n->setString(text);
-        if (label) {
-            label->limitLabelWidth(maxWidth, NOTICE_LABEL_SCALE, 0.1f);
-            n->setString(text);  // laid out again at that size
-        }
-        return;
+    if (auto label = findFirstChildRecursive<geode::Label>(n, [](geode::Label*) { return true; })) {
+        label->setFont(text::fontFor(text));
+        label->setLimitLabelWidth(maxWidth, NOTICE_LABEL_SCALE, 0.1f);
     }
-    if (!own) {
-        if (!label || !label->getParent()) return n->setString(text);
-        own = CCLabelBMFont::create("", font);
-        own->setID(OWN_LABEL);
-        // After the icon, which setIcon adds at the end.
-        label->getParent()->addChild(own, 1);
-    }
-    own->setString(text.c_str());
-    own->limitLabelWidth(maxWidth, NOTICE_LABEL_SCALE, 0.1f);
-    n->setString("");  // lays the notification out again, around the mod's label
+    n->setString(text);  // lays the notification out around it
 }
 
 void notify(std::string const& text, NotificationIcon icon = NotificationIcon::Info) {
@@ -571,12 +551,33 @@ Frame frameAt(Frames const& frames, Times const& times, size_t& i, double at, Fr
     return between(frames[a], frames[b], (at - times[a]) / (times[b] - times[a]));
 }
 
-// m_currentCheckpoint is retained by the layer (startMusic retains the one it creates).
+// The checkpoint a restart from the startpos `obj` loads in normal mode: the game keeps one for each startpos, by its
+// unique ID, in m_checkpointsDict (2.2091; 2.2081 had one, m_currentCheckpoint), and makes it in startMusic the first
+// time an attempt starts there.
+CheckpointObject* checkpointOf(PlayLayer* pl, StartPosObject* obj) {
+    if (!obj || !pl->m_checkpointsDict) return nullptr;
+    return typeinfo_cast<CheckpointObject*>(pl->m_checkpointsDict->objectForKey(obj->m_uniqueID));
+}
+
+// The one of the startpos the game has.
+CheckpointObject* currentCheckpoint(PlayLayer* pl) {
+    return checkpointOf(pl, pl->m_startPosObject);
+}
+
+// The dictionary retains it.
 void setCurrentCheckpoint(PlayLayer* pl, CheckpointObject* cp) {
-    if (pl->m_currentCheckpoint == cp) return;
-    CC_SAFE_RETAIN(cp);
-    CC_SAFE_RELEASE(pl->m_currentCheckpoint);
-    pl->m_currentCheckpoint = cp;
+    auto obj = pl->m_startPosObject;
+    if (!obj || !pl->m_checkpointsDict || checkpointOf(pl, obj) == cp) return;
+    if (cp) pl->m_checkpointsDict->setObject(cp, obj->m_uniqueID);
+    else pl->m_checkpointsDict->removeObjectForKey(obj->m_uniqueID);
+}
+
+// The startpos restarts go to. The game's setActiveStartPosObject (2.2091) turns test mode on with a startpos and
+// off without; 2.2081's setStartPosObject left it, and the mod sets it itself where it matters.
+void setStartPos(PlayLayer* pl, StartPosObject* obj) {
+    bool testMode = pl->m_isTestMode;
+    pl->setActiveStartPosObject(obj);
+    pl->m_isTestMode = testMode;
 }
 
 // The SP whose object `obj` is, if it's one.
@@ -625,11 +626,13 @@ StartPosObject* addStartPos(PlayLayer* pl, CCPoint at, bool keepIds) {
     obj->m_isDontEnter = true;
     obj->m_ignoreEnter = true;
     obj->setPosition(at);
+    // Its own ID before addObject: whatever the game files there by ID has it from the start.
+    storage::numberObject(pl, obj);
     auto startPos = pl->m_startPosObject;
     bool testMode = pl->m_isTestMode;
     pl->addObject(obj);
     // The game takes an added startpos for the level's start when it's further on: keep the one it has.
-    if (pl->m_startPosObject != startPos) pl->setStartPosObject(startPos);
+    if (pl->m_startPosObject != startPos) setStartPos(pl, startPos);
     pl->m_isTestMode = testMode;
     g_session.objectsMade++;
     return obj;
@@ -693,12 +696,10 @@ void madeEarly(PlayLayer* pl) {
 // Takes a deleted SP's object out of the level.
 void retireObject(PlayLayer* pl, StartPoint& sp) {
     if (!sp.object) return;
+    // Its checkpoint in the game's out with it (the object keeps its ID, and may go to another SP).
+    if (pl->m_checkpointsDict) pl->m_checkpointsDict->removeObjectForKey(sp.object->m_uniqueID);
     setAside(pl, sp.object);
-    sp.object = nullptr;  // it may go to another SP
-    // The SPs' objects after it moved up a place.
-    for (auto const& other : g_session.sps) {
-        if (other->object) storage::numberObject(pl, other->object);
-    }
+    sp.object = nullptr;
 }
 
 // Where restarts go: an SP, a startpos of the level (in the switcher, see Session::levelShown), or neither: the
@@ -739,7 +740,7 @@ void choose(Entry to, bool now = false) {
     s.chosenNow = now;
     auto pl = PlayLayer::get();
     s.startPosWhenChosen = pl ? pl->m_startPosObject : nullptr;
-    s.checkpointWhenChosen = pl ? pl->m_currentCheckpoint : nullptr;
+    s.checkpointWhenChosen = pl ? currentCheckpoint(pl) : nullptr;
 }
 
 void choose(std::shared_ptr<StartPoint> sp, bool now = false) {
@@ -753,7 +754,7 @@ Entry pastDeleted(StartPosObject* obj);
 // the SP's checkpoint, or the level its own start back.
 void applyActiveSP(PlayLayer* pl) {
     auto& s = g_session;
-    bool foreign = pl->m_startPosObject != s.startPosWhenChosen || pl->m_currentCheckpoint != s.checkpointWhenChosen;
+    bool foreign = pl->m_startPosObject != s.startPosWhenChosen || currentCheckpoint(pl) != s.checkpointWhenChosen;
     bool picked = s.chosen && (!foreign || s.chosenNow);
     if (!picked && isRetired(pl->m_startPosObject)) {
         auto to = pastDeleted(pl->m_startPosObject);
@@ -766,18 +767,11 @@ void applyActiveSP(PlayLayer* pl) {
         s.activeLevel = s.active ? nullptr : levelStartPosOf(pl->m_startPosObject);
     }
     s.chosen = s.chosenNow = false;
-    // A switcher that nulls m_currentCheckpoint without releasing it (capeling's) leaves the layer's retain on
-    // the SP's checkpoint, which would then never be freed: give it back, if nobody did.
-    if (s.lastCheckpoint && pl->m_currentCheckpoint != s.lastCheckpoint &&
-        s.lastCheckpoint->retainCount() == s.lastCheckpointRetains) {
-        log::info("SP checkpoint dropped by another mod without a release: released");
-        s.lastCheckpoint->release();
-    }
     s.spawning = nullptr;
     if (s.active && s.active->object) {
-        pl->setStartPosObject(s.active->object);
+        // The SP's checkpoint in its startpos's entry: the game's restart loads it.
+        setStartPos(pl, s.active->object);
         setCurrentCheckpoint(pl, s.active->cp);
-        s.lastCheckpoint = s.active->cp;
         pl->m_isTestMode = true;
         s.ownTestMode = true;
         s.spawning = s.active;
@@ -785,37 +779,29 @@ void applyActiveSP(PlayLayer* pl) {
     }
     s.active = nullptr;
     if (picked && s.levelShown) {
-        // The mod picked a startpos of the level or the level start: there, as other mods' switchers go. The
-        // checkpoint the game made at the startpos it starts from (an SP's, set by the mod) would put the player
-        // back there: the game makes the new one's.
+        // The mod picked a startpos of the level or the level start: there, as other mods' switchers go, with the
+        // checkpoint the game keeps for it (each startpos has its own).
         auto to = s.activeLevel;
-        if (pl->m_startPosObject != to || (s.lastCheckpoint && pl->m_currentCheckpoint == s.lastCheckpoint)) {
-            setCurrentCheckpoint(pl, nullptr);
-        }
-        pl->setStartPosObject(to);
+        setStartPos(pl, to);
         pl->m_isTestMode = to != nullptr;
         s.ownTestMode = false;
-        s.lastCheckpoint = nullptr;
         return;
     }
     // Off the SPs (also when a switcher picks a deleted SP's object): the level's own start.
     bool retired = isRetired(pl->m_startPosObject);
-    if (spOf(pl->m_startPosObject) || retired) pl->setStartPosObject(levelStart());
+    if (spOf(pl->m_startPosObject) || retired) setStartPos(pl, levelStart());
     // Test mode was on for the SP (or the switcher that picked the deleted SP turned it on).
     if (s.ownTestMode || retired) {
         if (pl->m_startPosObject == levelStart()) pl->m_isTestMode = levelStartTestMode();
         else if (!pl->m_startPosObject) pl->m_isTestMode = false;
     }
     s.ownTestMode = false;
-    // An SP's checkpoint never loads at another startpos: the game makes its own in startMusic.
-    if (s.lastCheckpoint && pl->m_currentCheckpoint == s.lastCheckpoint) setCurrentCheckpoint(pl, nullptr);
-    s.lastCheckpoint = nullptr;
 }
 
 // After resetLevel: the attempt spawned from the SP (and not from a practice checkpoint).
 void startPlayback(PlayLayer* pl) {
     auto sp = std::exchange(g_session.spawning, nullptr);
-    if (!sp || pl->m_startPosObject != sp->object || pl->m_currentCheckpoint != sp->cp) return;
+    if (!sp || pl->m_startPosObject != sp->object || currentCheckpoint(pl) != sp->cp) return;
     if (pl->m_checkpointArray->count() > 0) return;
     g_play.sp = sp;
     g_play.controlling = true;
@@ -931,12 +917,13 @@ std::vector<char const*> portalStateBack(GJGameState& gs, GJGameState const& c) 
         now = was;
         back.push_back(name);
     };
-    field(gs.m_unkPoint5, c.m_unkPoint5, "unkPoint5");
-    field(gs.m_unkPoint6, c.m_unkPoint6, "unkPoint6");
-    field(gs.m_unkPoint7, c.m_unkPoint7, "unkPoint7");
-    field(gs.m_unkPoint10, c.m_unkPoint10, "unkPoint10");
-    field(gs.m_unkPoint11, c.m_unkPoint11, "unkPoint11");
-    field(gs.m_unkPoint17, c.m_unkPoint17, "unkPoint17");
+    // 2.2081's m_unkPoint5, 6, 7, 10, 11, 17: the same places (bindings 2.2091 name them).
+    field(gs.m_staticCameraStart, c.m_staticCameraStart, "staticCameraStart");
+    field(gs.m_staticCameraPosition, c.m_staticCameraPosition, "staticCameraPosition");
+    field(gs.m_staticCameraTarget, c.m_staticCameraTarget, "staticCameraTarget");
+    field(gs.m_staticStartVelocity, c.m_staticStartVelocity, "staticStartVelocity");
+    field(gs.m_staticCameraDuration, c.m_staticCameraDuration, "staticCameraDuration");
+    field(gs.m_staticCameraActive, c.m_staticCameraActive, "staticCameraActive");
     field(gs.m_lastModeHeight, c.m_lastModeHeight, "lastModeHeight");
     field(gs.m_portalY, c.m_portalY, "portalY");
     field(gs.m_unkInt14, c.m_unkInt14, "unkInt14");
@@ -1832,13 +1819,13 @@ class $modify(SPCBlanksOut, PlayLayer) {
 };
 
 class $modify(SPCPlayLayer, PlayLayer) {
-    bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
+    bool init(GJGameLevel* level, bool dontCreateObjects) {
         g_session = Session{};
         g_session.hiding = hideLevelStartPoses();
         g_sessionCount++;
         g_rec = Recording{};
         g_play = Playback{};
-        if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        if (!PlayLayer::init(level, dontCreateObjects)) return false;
         log::info("PlayLayer::init: level {} \"{}\"", level->m_levelID.value(), level->m_levelName);
         return true;
     }
@@ -1914,7 +1901,6 @@ class $modify(SPCPlayLayer, PlayLayer) {
         startPlayback(this);
         auto& s = g_session;
         s.startedAtX = m_startPosObject ? m_startPosObject->getPositionX() : -std::numeric_limits<float>::infinity();
-        if (s.lastCheckpoint) s.lastCheckpointRetains = s.lastCheckpoint->retainCount();
         smoke::restarted(this);
     }
 

@@ -145,7 +145,7 @@ protected:
     }
 
 public:
-    CCLabelBMFont* titleLabel() { return m_title; }
+    geode::Label* titleLabel() { return m_title; }
     using Popup::setTitle;
 };
 
@@ -245,7 +245,7 @@ protected:
     }
 
 public:
-    CCLabelBMFont* titleLabel() { return m_title; }
+    geode::Label* titleLabel() { return m_title; }
     using Popup::setTitle;
 
     static SaveFirstPopup* create(size_t count, bool deleting, geode::Function<void(bool)> then) {
@@ -448,7 +448,7 @@ protected:
     }
 
 public:
-    CCLabelBMFont* titleLabel() { return m_title; }
+    geode::Label* titleLabel() { return m_title; }
     using Popup::setTitle;
 
     static RenamePopup* create(std::string const& title, std::string const& name, geode::Function<void(std::string)> save) {
@@ -655,7 +655,7 @@ protected:
     }
 
 public:
-    CCLabelBMFont* titleLabel() { return m_title; }
+    geode::Label* titleLabel() { return m_title; }
     using Popup::setTitle;
 
     static VersionsPopup* create(geode::Function<void()> changed) {
@@ -743,7 +743,7 @@ protected:
     }
 
 public:
-    CCLabelBMFont* titleLabel() { return m_title; }
+    geode::Label* titleLabel() { return m_title; }
     using Popup::setTitle;
 
     static AutoPartPopup* create(geode::Function<void()> changed) {
@@ -984,7 +984,7 @@ protected:
     }
 
 public:
-    CCLabelBMFont* titleLabel() { return m_title; }
+    geode::Label* titleLabel() { return m_title; }
     using Popup::setTitle;
 
     static SPListPopup* create(PauseLayer* pause) {
@@ -1027,7 +1027,8 @@ class $modify(SPCPauseLayer, PauseLayer) {
         PauseLayer::customSetup();
         auto pl = PlayLayer::get();
         if (!pl || pl->m_isPlatformer) return;
-        auto menu = this->getChildByID("right-button-menu");
+        // In node-ids for 2.2091 the pause menu's parts are inside its "main-layer".
+        auto menu = this->getChildByIDRecursive("right-button-menu");
         if (!menu) {
             log::warn("Pause menu: no right-button-menu, the SP list button is left out");
             return;

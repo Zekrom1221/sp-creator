@@ -5,22 +5,6 @@
 #include <Geode/utils/file.hpp>
 #include <Geode/utils/string.hpp>
 
-// PersistenceAPI marks everything __declspec(dllimport), templates defined in its headers too, which
-// MSVC refuses (C2491; clang-cl only warns). Without the attribute the templates are compiled here and
-// the functions PersistenceAPI exports are reached through its import library's stubs all the same.
-#include <sabe.persistenceapi/include/import_export.hpp>
-#undef SABE_PA_DLL
-#define SABE_PA_DLL
-
-#include <sabe.persistenceapi/include/hooks/EffectManagerState.hpp>
-#include <sabe.persistenceapi/include/hooks/FMODAudioState.hpp>
-#include <sabe.persistenceapi/include/hooks/GJGameState.hpp>
-#include <sabe.persistenceapi/include/hooks/GJShaderState.hpp>
-#include <sabe.persistenceapi/include/hooks/PlayerCheckpoint.hpp>
-#include <sabe.persistenceapi/include/hooks/cocos2d/CCArray.hpp>
-#include <sabe.persistenceapi/include/hooks/cocos2d/CCNode.hpp>
-#include <sabe.persistenceapi/include/util/Stream.hpp>
-
 #include <zlib.h>
 
 #include <algorithm>
@@ -39,16 +23,15 @@
 #include <unordered_map>
 
 using namespace geode::prelude;
-using namespace persistenceAPI;
 
 namespace {
 
 constexpr char MAGIC[8] = {'S', 'P', 'C', 'R', 'E', 'A', 'T', 'R'};
 // A file with the body compressed after its header (see compress()). Older files hold it as it is (MAGIC).
 constexpr char COMPRESSED_MAGIC[8] = {'S', 'P', 'C', 'R', 'E', 'A', 'T', 'Z'};
-constexpr int FORMAT_VERSION = 2;
-// PersistenceAPI's own format version, the one Practice Checkpoint Permanence writes with.
-constexpr int PA_VERSION = 2;
+// 3: the checkpoint as the game's own string (serializeCheckpoint), GD 2.2091 on. 2: through PersistenceAPI (GD
+// 2.2081), read by nothing here: those SPs stay in their level's versions.
+constexpr int FORMAT_VERSION = 3;
 constexpr unsigned int END_MARKER = 0x21505321;  // "!SP!"
 // After the body: its hash and the end marker.
 constexpr size_t SEAL_SIZE = sizeof(uint64_t) + sizeof(END_MARKER);
@@ -57,14 +40,19 @@ constexpr unsigned int MAX_FRAMES = 4000;
 constexpr unsigned int MAX_INPUTS = 4000;
 constexpr int MAX_ID = 1000000;
 
-// PersistenceAPI saves a reference to a level object as its m_uniqueID - 12, and turns it back into
-// m_objects[index] when loading. That only holds if the level's objects get unique IDs 12, 13, ... in
-// m_objects order, in every session. PersistenceAPI resets the global counter in PlayLayer::init, but
-// anything created between that and the level's objects would shift them, so the counter is set again
-// right before the level's objects, as Practice Checkpoint Permanence does. It's the counter
-// GameObject::resetMID writes (Geode bindings, GD 2.2081 Windows); load() checks the result.
-constexpr uintptr_t UNIQUE_ID_COUNTER = 0x6ba158;
+// The game's checkpoint string refers to a level object by its m_uniqueID, and deserializeCheckpoint finds it again
+// by that ID (in GJBaseGameLayer::m_unk3680, ID -> object). That only holds if the level's objects get the same
+// unique IDs in every session: 12, 13, ... in m_objects order, as the game gives them. Anything created between
+// the game's reset of the counter and the level's objects would shift them, so the counter is set again right
+// before the level's objects. It's the counter GameObject::resetMID writes (Geode bindings, GD 2.2091 Windows);
+// load() checks the result.
+constexpr uintptr_t UNIQUE_ID_COUNTER = 0x8fe470;
 constexpr int FIRST_OBJECT_ID = 12;
+// The SPs' own startpos objects: unique IDs of their own, the same for as long as an object lives, which no other
+// object takes (the game keys a startpos's checkpoint by its ID, see main.cpp, and finds objects by their IDs).
+constexpr int FIRST_SP_OBJECT_ID = 0x50000000;
+// Stand-ins for objects an update took away (standIn): IDs no checkpoint of the open version has.
+constexpr int FIRST_STAND_IN_ID = 0x7a000000;
 
 std::filesystem::path g_root = "levels";
 
@@ -163,48 +151,56 @@ void showHidden() {
     g_hidden = HiddenObjects();
 }
 
-// A persistenceAPI::Stream in memory: an SP file's body is compressed, so it's written and read here, not in
-// the file. PersistenceAPI reads and writes through its std::fstream only, which gets a buffer in memory.
-class MemoryStream : public Stream {
-    struct ReadBuffer : std::streambuf {
-        explicit ReadBuffer(ByteSpan bytes) {
-            // Only read from.
-            auto data = reinterpret_cast<char*>(const_cast<uint8_t*>(bytes.data()));
-            setg(data, data, data + bytes.size());
-        }
-    };
-    std::optional<ReadBuffer> m_in;
-    std::stringbuf m_out{std::ios::out};
+// An SP file's body, written and read in memory (it's compressed after its header, see compress()): values as they
+// are in memory, little-endian, one after the other, as PersistenceAPI's stream had them in format 2 (a bool a byte).
+class BodyWriter {
+    ByteVector m_bytes;
 
 public:
-    // Writing.
-    MemoryStream() {
-        m_stream = new std::fstream();
-        m_stream->std::ios::rdbuf(&m_out);
-        m_PAVersion = PA_VERSION;
+    void write(void const* data, size_t size) {
+        auto at = static_cast<uint8_t const*>(data);
+        m_bytes.insert(m_bytes.end(), at, at + size);
     }
-    // Reading `bytes`, which outlive it.
-    MemoryStream(ByteSpan bytes, unsigned int* bytesRead) : m_in(std::in_place, bytes) {
-        m_stream = new std::fstream();
-        m_stream->std::ios::rdbuf(&*m_in);
-        m_bytesRead = bytesRead;
-        m_PAVersion = PA_VERSION;
-        // PersistenceAPI reads counts and sizes without checking them: in a body that doesn't hold what they
-        // say, it would go on past the end. This makes that throw, for readSP to catch.
-        m_stream->exceptions(std::ios::failbit | std::ios::badbit);
+    template <class T>
+        requires std::is_arithmetic_v<T>
+    BodyWriter& operator<<(T value) {
+        write(&value, sizeof(value));
+        return *this;
     }
-    ~MemoryStream() {
-        // Before its buffers go (Stream would delete it after).
-        delete m_stream;
-        m_stream = nullptr;
+    ByteVector& bytes() {
+        return m_bytes;
     }
+};
 
-    bool good() const {
-        return m_stream && m_stream->good();
-    }
+// Reads `bytes` (which outlive it); past their end it throws, for readSP to catch.
+class BodyReader {
+    ByteSpan m_bytes;
+    size_t m_at = 0;
 
-    std::string written() {
-        return std::move(m_out).str();
+public:
+    explicit BodyReader(ByteSpan bytes) : m_bytes(bytes) {}
+    void read(void* data, size_t size) {
+        if (size > m_bytes.size() - m_at) throw std::out_of_range("past the end of the body");
+        std::memcpy(data, m_bytes.data() + m_at, size);
+        m_at += size;
+    }
+    template <class T>
+        requires(std::is_arithmetic_v<T> && !std::is_same_v<T, bool>)
+    BodyReader& operator>>(T& value) {
+        read(&value, sizeof(value));
+        return *this;
+    }
+    BodyReader& operator>>(bool& value) {
+        uint8_t byte = 0;
+        read(&byte, 1);
+        value = byte != 0;
+        return *this;
+    }
+    size_t done() const {
+        return m_at;
+    }
+    size_t left() const {
+        return m_bytes.size() - m_at;
     }
 };
 
@@ -459,92 +455,56 @@ void readNames(std::vector<std::shared_ptr<StartPoint>> const& sps) {
     if (names.size() > named) storage::saveNames(sps);
 }
 
-void writePlayer(Stream& out, PlayerFrame f) {
+void writePlayer(BodyWriter& out, PlayerFrame f) {
     out << f.y;
     out << f.yVel;
     out << f.rot;
 }
 
-void readPlayer(Stream& in, PlayerFrame& f) {
+void readPlayer(BodyReader& in, PlayerFrame& f) {
     in >> f.y;
     in >> f.yVel;
     in >> f.rot;
 }
 
-void writeCheckpoint(Stream& out, CheckpointObject* cp) {
-    reinterpret_cast<PACCNode*>(cp)->save(out);
-    bool hasP2 = cp->m_player2Checkpoint != nullptr;
-    bool hasGradients = cp->m_gradientTriggerObjectArray != nullptr;
-    out << hasP2;
-    out << hasGradients;
-    reinterpret_cast<PAGJGameState*>(&cp->m_gameState)->save(out);
-    reinterpret_cast<PAGJShaderState*>(&cp->m_shaderState)->save(out);
-    reinterpret_cast<PAFMODAudioState*>(&cp->m_audioState)->save(out);
-    reinterpret_cast<PAPlayerCheckpoint*>(cp->m_player1Checkpoint)->save(out);
-    if (hasP2) reinterpret_cast<PAPlayerCheckpoint*>(cp->m_player2Checkpoint)->save(out);
-    out << cp->m_unke78;
-    out << cp->m_unke7c;
-    out << cp->m_unke80;
-    out << cp->m_ground2Invisible;
-    out << cp->m_streakBlend;
-    out << cp->m_uniqueID;
-    out << cp->m_respawnID;
-    out << cp->m_vectorSavedObjectStateRef;
-    out << cp->m_vectorActiveSaveObjectState;
-    out << cp->m_vectorSpecialSaveObjectState;
-    reinterpret_cast<PAEffectManagerState*>(&cp->m_effectManagerState)->save(out);
-    if (hasGradients) static_cast<PACCArray*>(cp->m_gradientTriggerObjectArray)->save<GradientTriggerObject>(out);
-    out << cp->m_unk11e8;
-    out << cp->m_sequenceTriggerStateUnorderedMap;
-    out << cp->m_commandIndex;
+// The checkpoint as the game writes it itself (the way it saves platformer levels): its size, then the string.
+// What it keeps was checked against the checkpoint field by field and in play (plan, П1): all a restart needs, the
+// song by its file name only. References to level objects are their unique IDs.
+void writeCheckpoint(BodyWriter& out, CheckpointObject* cp) {
+    std::string text = serializeCheckpoint(cp);
+    out << static_cast<uint32_t>(text.size());
+    out.write(text.data(), text.size());
 }
 
-CheckpointObject* readCheckpoint(Stream& in) {
+// Read with the open level's objects (deserializeCheckpoint finds them by their unique IDs). An ID it doesn't
+// find leaves that reference empty (the state of an object, out): nothing is read past anything.
+CheckpointObject* readCheckpoint(BodyReader& in, std::string& error) {
+    uint32_t size = 0;
+    in >> size;
+    if (size == 0 || size > in.left()) {
+        error = fmt::format("a checkpoint of {} chars, {} bytes left", size, in.left());
+        return nullptr;
+    }
+    std::string text(size, '\0');
+    in.read(text.data(), size);
+    auto pl = PlayLayer::get();
+    if (!pl) {
+        error = "no level to read the checkpoint with";
+        return nullptr;
+    }
     auto cp = CheckpointObject::create();
-    reinterpret_cast<PACCNode*>(cp)->load(in);
-    bool hasP2 = false, hasGradients = false;
-    in >> hasP2;
-    in >> hasGradients;
-    reinterpret_cast<PAGJGameState*>(&cp->m_gameState)->load(in);
-    reinterpret_cast<PAGJShaderState*>(&cp->m_shaderState)->load(in);
-    reinterpret_cast<PAFMODAudioState*>(&cp->m_audioState)->load(in);
-    // The checkpoint's destructor releases these.
-    cp->m_player1Checkpoint = PlayerCheckpoint::create();
-    CC_SAFE_RETAIN(cp->m_player1Checkpoint);
-    reinterpret_cast<PAPlayerCheckpoint*>(cp->m_player1Checkpoint)->load(in);
-    if (hasP2) {
-        cp->m_player2Checkpoint = PlayerCheckpoint::create();
-        CC_SAFE_RETAIN(cp->m_player2Checkpoint);
-        reinterpret_cast<PAPlayerCheckpoint*>(cp->m_player2Checkpoint)->load(in);
+    deserializeCheckpoint(cp, text, pl);
+    if (!cp->m_player1Checkpoint) {
+        error = "no player in the checkpoint";
+        return nullptr;
     }
-    in >> cp->m_unke78;
-    in >> cp->m_unke7c;
-    in >> cp->m_unke80;
-    in >> cp->m_ground2Invisible;
-    in >> cp->m_streakBlend;
-    in >> cp->m_uniqueID;
-    in >> cp->m_respawnID;
-    in >> cp->m_vectorSavedObjectStateRef;
-    in >> cp->m_vectorActiveSaveObjectState;
-    in >> cp->m_vectorSpecialSaveObjectState;
-    reinterpret_cast<PAEffectManagerState*>(&cp->m_effectManagerState)->load(in);
-    if (hasGradients) {
-        cp->m_gradientTriggerObjectArray = CCArray::create();
-        CC_SAFE_RETAIN(cp->m_gradientTriggerObjectArray);
-        static_cast<PACCArray*>(cp->m_gradientTriggerObjectArray)->load<GradientTriggerObject>(in);
-    }
-    in >> cp->m_unk11e8;
-    in >> cp->m_sequenceTriggerStateUnorderedMap;
-    in >> cp->m_commandIndex;
     return cp;
 }
 
 // Body: magic, format, level stamp, the SP's own data, the checkpoint, the presses. fileFor() then compresses
 // and seals it.
-void writeSP(Stream& out, StartPoint const& sp) {
-    char magic[sizeof(MAGIC)];
-    std::memcpy(magic, MAGIC, sizeof(MAGIC));
-    out.write(magic, sizeof(magic));
+void writeSP(BodyWriter& out, StartPoint const& sp) {
+    out.write(MAGIC, sizeof(MAGIC));
     int format = FORMAT_VERSION, id = sp.id, spawnStep = sp.spawnStep;
     unsigned long long stamp = g_level.stamp;
     float x = sp.x, percent = sp.percent;
@@ -746,8 +706,7 @@ uint64_t contentHash(ByteSpan body) {
 // `body` as bodyOf gives it.
 std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStamp, std::string& error, ReadError& kind) {
     size_t bodySize = body.size();
-    unsigned int bytesRead = 0;
-    MemoryStream in(body, &bytesRead);
+    BodyReader in(body);
     char magic[sizeof(MAGIC)] = {};
     in.read(magic, sizeof(magic));
     int format = 0;
@@ -797,20 +756,21 @@ std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStam
         in >> input.p1;
         in >> input.down;
     }
-    if (bytesRead >= bodySize) {
+    if (in.left() == 0) {
         error = "no checkpoint";
         return nullptr;
     }
-    sp->cp = readCheckpoint(in);
-    sp->pressHolds = bytesRead == bodySize;
+    sp->cp = readCheckpoint(in, error);
+    if (!sp->cp) return nullptr;
+    sp->pressHolds = in.left() == 0;
     if (!sp->pressHolds) {
         for (auto& p : sp->pressed) {
             in >> p.jumpBuffered;
             in >> p.ringJump;
         }
     }
-    if (bytesRead != bodySize) {
-        error = fmt::format("the checkpoint read {} bytes, the body holds {}", bytesRead, bodySize);
+    if (in.done() != bodySize) {
+        error = fmt::format("{} bytes read, the body holds {}", in.done(), bodySize);
         return nullptr;
     }
     kind = ReadError::None;
@@ -821,8 +781,8 @@ std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStam
 std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, uint64_t versionStamp, std::string& error,
     ReadError& kind) {
     kind = ReadError::Other;
-    // PersistenceAPI checks nothing it reads, so the whole file is checked against its seal first (and a
-    // compressed one unpacked): past that it isn't cut off or changed since it was sealed.
+    // The whole file is checked against its seal first (and a compressed one unpacked): past that it isn't cut off
+    // or changed since it was sealed.
     auto data = disk::readBinary(path);
     if (data.isErr()) {
         error = fmt::format("can't read it: {}", data.unwrapErr());
@@ -848,8 +808,8 @@ std::shared_ptr<StartPoint> readSP(std::filesystem::path const& path, int id, st
     return readSP(path, id, g_level.stamp, error, kind);
 }
 
-// The SP files of `dir` written before SP files were compressed, compressed: the same body, not read again
-// through PersistenceAPI. Damaged ones stay as they are, for load() to set aside.
+// The SP files of `dir` written before SP files were compressed, compressed: the same body, not read again. Damaged
+// ones stay as they are, for load() to set aside.
 void compressOlder(std::filesystem::path const& dir) {
     auto start = std::chrono::steady_clock::now();
     int done = 0, failed = 0;
@@ -885,100 +845,64 @@ void compressOlder(std::filesystem::path const& dir) {
         after / 1024, ms, failed);
 }
 
-// A stand-in for a level object an update took away, of the same kind (its object ID), for while an SP of
-// the older version is read (readOtherVersion()). Outside the level: none may stay in a checkpoint.
-// Kept for as long as the game runs: released at exit, after cocos, they could crash it. Null if even a
-// block can't be made.
+int& idCounter();
+
+// A stand-in for a level object an update took away, of the same kind (its object ID), for while an SP of the older
+// version is read (readOtherVersion()). Outside the level, with an ID of its own (FIRST_STAND_IN_ID on): none may stay
+// in a checkpoint. Made without an ID from the game's counter. Kept for as long as the game runs: released at exit,
+// after cocos, they could crash it. Null if even a block can't be made.
 GameObject* standIn(uint16_t id) {
     static std::map<uint16_t, GameObject*> made;
     auto& obj = made[id];
     if (!obj) {
+        int next = idCounter();
         obj = GameObject::createWithKey(id);
         if (!obj) obj = GameObject::createWithKey(1);
-        if (obj) obj->retain();
+        idCounter() = next;
+        if (obj) {
+            obj->retain();
+            obj->m_uniqueID = FIRST_STAND_IN_ID + id;
+        }
     }
     return obj;
 }
 
-// While an SP is read: the array in the level's m_objects. PersistenceAPI saves a reference to an object
-// as its index and turns it back with m_objects->objectAtIndex(index), checking nothing, which the hook
-// catches for this array. An index past the array gets a stand-in instead of memory past it; and an array
-// made of the open level version's objects in another version's order (readOtherVersion()) gives an SP of
-// that version the same objects in this one.
-struct Remap {
-    CCArray* array = nullptr;
-    std::vector<bool> standing;                 // by index: a stand-in is there
-    unsigned int objects = 0;                   // the level's objects in it (not the mod's own after them)
-    int standIns = 0;                           // references to stand-ins
-    int outside = 0;                            // references past the level's objects
-#ifdef SPC_SMOKE
-    std::vector<unsigned int>* seen = nullptr;  // smoke test: every index asked for
-#endif
-} g_remap;
+bool isStandInId(int64_t id) {
+    return id >= FIRST_STAND_IN_ID && id < FIRST_STAND_IN_ID + 0x10000;
+}
 
-CCObject* remapObjectAtIndex(CCArray* self, unsigned int index) {
-    // Called from the hook, this goes on to the game's own.
-    if (self != g_remap.array) return self->objectAtIndex(index);
-#ifdef SPC_SMOKE
-    if (g_remap.seen) g_remap.seen->push_back(index);
-#endif
-    if (index >= g_remap.objects) {
-        g_remap.outside++;
-        // Something to read into: the SP doesn't get used.
-        if (auto obj = standIn(1)) return obj;
-        return self->count() > 0 ? self->objectAtIndex(0) : nullptr;
+// How many fields of a checkpoint string (values between , | : ~) are stand-ins' unique IDs: references to them.
+int standInIdsIn(std::string_view text) {
+    int found = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= text.size(); i++) {
+        if (i < text.size() && text[i] != ',' && text[i] != '|' && text[i] != ':' && text[i] != '~') continue;
+        auto field = text.substr(start, i - start);
+        start = i + 1;
+        int64_t value = 0;
+        auto [end, ec] = std::from_chars(field.data(), field.data() + field.size(), value);
+        if (ec == std::errc() && end == field.data() + field.size() && isStandInId(value)) found++;
     }
-    if (index < g_remap.standing.size() && g_remap.standing[index]) g_remap.standIns++;
-    return self->objectAtIndex(index);
+    return found;
 }
 
-Hook* g_remapHook = nullptr;
-
-// Off but while it's needed: the game asks arrays for objects all the time.
-$execute {
-    auto cocos = GetModuleHandleW(L"libcocos2d.dll");
-    auto address = cocos ? GetProcAddress(cocos, "?objectAtIndex@CCArray@cocos2d@@QEAAPEAVCCObject@2@I@Z") : nullptr;
-    if (!address) return log::error("CCArray::objectAtIndex not found: SPs can't be moved over to a new level version");
-    auto hook = Hook::create(reinterpret_cast<void*>(address), &remapObjectAtIndex, "cocos2d::CCArray::objectAtIndex",
-        tulip::hook::TulipConvention::Default);
-    hook->setAutoEnable(false);
-    auto claimed = Mod::get()->claimHook(std::move(hook));
-    if (claimed.isErr()) return log::error("Can't hook CCArray::objectAtIndex: {}", claimed.unwrapErr());
-    g_remapHook = claimed.unwrap();
-}
-
-// `array` in the level's m_objects, the hook on, for as long as it lives. Without the hook SPs are read
-// as before: unchecked, and none moved over.
-class RemapOn {
+// While an SP of another level version is read (readOtherVersion()): the game finds the objects a checkpoint refers
+// to by their unique IDs in GJBaseGameLayer::m_unk3680. For that while it holds that version's IDs (its objects'
+// places + FIRST_OBJECT_ID) for the open version's same objects, or stand-ins for those the update took away; the
+// level's own map comes back after. An ID the map doesn't have leaves that reference empty.
+class UidMapOn {
     PlayLayer* m_pl;
-    CCArray* m_objects;
-    bool m_on = false;
-    RealObjects m_real;
+    std::unordered_map<int, GameObject*> m_real;
 
 public:
-    RemapOn(PlayLayer* pl, CCArray* array, std::vector<bool> standing = {}) : m_pl(pl), m_objects(pl->m_objects) {
-        if (!g_remapHook) return;
-        if (auto res = g_remapHook->enable(); res.isErr()) {
-            log::error("Can't turn the CCArray::objectAtIndex hook on: {}", res.unwrapErr());
-            return;
-        }
-        m_on = true;
-        g_remap.array = array;
-        g_remap.standing = std::move(standing);
-        // The level's own: the mod's objects after them (SPs' startposes) are made anew each time.
-        g_remap.objects = array == pl->m_objects && !g_level.prints.empty() ? static_cast<unsigned int>(g_level.prints.size())
-                                                                             : array->count();
-        pl->m_objects = array;
+    UidMapOn(PlayLayer* pl, std::unordered_map<int, GameObject*> map) : m_pl(pl), m_real(std::move(pl->m_unk3680)) {
+        pl->m_unk3680 = std::move(map);
     }
-    ~RemapOn() {
-        if (!m_on) return;
-        m_pl->m_objects = m_objects;
-        g_remap = {};
-        if (auto res = g_remapHook->disable(); res.isErr()) log::error("Can't turn the CCArray::objectAtIndex hook off: {}", res.unwrapErr());
+    ~UidMapOn() {
+        m_pl->m_unk3680 = std::move(m_real);
     }
-    explicit operator bool() const {
-        return m_on;
-    }
+    UidMapOn(UidMapOn const&) = delete;
+    UidMapOn& operator=(UidMapOn const&) = delete;
 };
 
 // What the checkpoint keeps of objects the update took away: where their groups moved them, whether they
@@ -1024,7 +948,7 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
     OtherVersion out;
     RealObjects real;
     auto info = disk::readJson(dir / "level.json");
-    if (!g_remapHook || g_level.prints.empty() || info.isErr() || !sameGame(info.unwrap(), g_level.info)) return out;
+    if (g_level.prints.empty() || info.isErr() || !sameGame(info.unwrap(), g_level.info)) return out;
     auto old = readPrints(dir / PRINTS_FILE);
     if (old.empty() || static_cast<int64_t>(old.size()) != info.unwrap()["objects"].asInt().unwrapOr(-1)) return out;
 
@@ -1032,23 +956,23 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
     std::unordered_map<uint64_t, std::vector<unsigned int>> where;
     for (unsigned int i = 0; i < g_level.prints.size(); i++) where[g_level.prints[i].hash].push_back(i);
     std::unordered_map<uint64_t, size_t> taken;
-    Ref<CCArray> array = CCArray::createWithCapacity(static_cast<unsigned int>(old.size()));
-    std::vector<bool> standing(old.size());
+    // That version's unique IDs: its objects' places + FIRST_OBJECT_ID (load() checks the order).
+    std::unordered_map<int, GameObject*> byOldId;
     std::set<GameObject*> standIns;
     size_t found = 0;
     for (size_t i = 0; i < old.size(); i++) {
+        int oldId = FIRST_OBJECT_ID + static_cast<int>(i);
         auto it = where.find(old[i].hash);
         auto& next = taken[old[i].hash];
         if (it != where.end() && next < it->second.size() && g_level.prints[it->second[next]].id == old[i].id) {
-            array->addObject(pl->m_objects->objectAtIndex(it->second[next++]));
+            byOldId[oldId] = static_cast<GameObject*>(pl->m_objects->objectAtIndex(it->second[next++]));
             found++;
             continue;
         }
         auto obj = standIn(old[i].id);
         if (!obj) return out;
-        array->addObject(obj);
+        byOldId[oldId] = obj;
         standIns.insert(obj);
-        standing[i] = true;
     }
     log::info("{}: {} of the {} objects of {} are in this version", g_level.key, found, old.size(), dir.filename());
 
@@ -1061,18 +985,17 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
     auto names = disk::readJson(dir / "names.json").unwrapOr(matjson::Value::object());
     if (!names.isObject()) names = matjson::Value::object();
     uint64_t stamp = levelStamp(g_level.plainKey, info.unwrap());
-    RemapOn on(pl, array, std::move(standing));
-    if (!on) return out;
+    UidMapOn on(pl, std::move(byOldId));
     out.known = true;
     for (auto const& [id, path] : files) {
-        g_remap.standIns = g_remap.outside = 0;
         std::string error;
         ReadError kind;
         auto sp = readSP(path, id, stamp, error, kind);
-        // Each reference read is one object asked for: all of those to stand-ins have to be among the
-        // object states, which go.
+        // The states of objects gone go; any other reference to a stand-in (the game writes references as unique
+        // IDs) shows in the checkpoint written again.
         int dropped = sp ? dropStandIns(sp->cp, standIns) : 0;
-        if (sp && g_remap.outside == 0 && dropped == g_remap.standIns) {
+        int left = sp ? standInIdsIn(serializeCheckpoint(sp->cp)) : 0;
+        if (sp && left == 0) {
             auto name = names[fmt::to_string(id)].asString().unwrapOr("");
             if (name.size() <= MAX_NAME_BYTES) sp->name = std::move(name);
             log::info("SP file {} of {} moved over ({} states of objects gone dropped)", path.filename(), dir.filename(), dropped);
@@ -1080,8 +1003,7 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
             continue;
         }
         log::info("SP file {} of {} not moved over: {}", path.filename(), dir.filename(),
-            sp ? fmt::format("{} references to objects gone, {} of them object states; {} past the level", g_remap.standIns,
-                     dropped, g_remap.outside)
+            sp ? fmt::format("{} references to objects gone besides their states ({} states dropped)", left, dropped)
                : error);
         float percent = sp ? sp->percent : percentIn(path);
         out.notMoved.push_back(percent);
@@ -1093,7 +1015,7 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
 
 // Could readOtherVersion() move SPs of `dir` over, as far as can be told without reading them?
 bool canMoveOver(std::filesystem::path const& dir) {
-    if (!g_remapHook || g_level.prints.empty()) return false;
+    if (g_level.prints.empty()) return false;
     auto info = disk::readJson(dir / "level.json");
     if (info.isErr() || !sameGame(info.unwrap(), g_level.info)) return false;
     auto count = info.unwrap()["objects"].asInt().unwrapOr(-1);
@@ -1331,13 +1253,9 @@ Loaded load(PlayLayer* pl) {
     if (plainKey.empty()) return out;
     auto key = lowDetail(pl) ? plainKey + std::string(LOW_DETAIL_SUFFIX) : plainKey;
     g_openKey = key;
-    // The game adds its anticheat spike (a spike at 0,105) after the level's objects, with an ID one past
-    // its place in m_objects. Give it the ID of its place, which no other object has (the check below
-    // makes sure), so that references to it load too.
-    if (auto spike = pl->m_anticheatSpike) {
-        int index = static_cast<int>(pl->m_objects->indexOfObject(spike));
-        if (index >= 0) spike->m_uniqueID = FIRST_OBJECT_ID + index;
-    }
+    // The game's anticheat spike (a spike at 0,105) comes after the level's objects with the ID of its place, as they
+    // have theirs (2.2091; 2.2081 gave it one past). Not changed here: the game has found objects by their IDs since
+    // it made them.
     int bad = firstObjectOutOfOrder(pl);
     if (bad >= 0) {
         log::error("SPs of {} can't be saved: object {} has unique ID {}, expected {}", key, bad,
@@ -1427,9 +1345,6 @@ Loaded load(PlayLayer* pl) {
          it.increment(ec)) {
         files.push_back(it->path());
     }
-    // Checked: an SP referring past the level's objects would read memory past them.
-    std::optional<RemapOn> checked;
-    checked.emplace(pl, pl->m_objects);
     for (auto const& path : files) {
         if (path.extension() == ".tmp") {
             std::filesystem::remove(path, ec);  // left by a crash while saving
@@ -1440,14 +1355,7 @@ Loaded load(PlayLayer* pl) {
         out.nextId = std::max(out.nextId, id + 1);
         std::string error;
         ReadError kind;
-        g_remap.outside = 0;
         auto sp = readSP(path, id, error, kind);
-        if (sp && g_remap.outside > 0) {
-            // Kept where it is: whole, so not damaged, only not for these objects.
-            error = fmt::format("its checkpoint refers to {} objects past the level's", g_remap.outside);
-            kind = ReadError::Other;
-            sp = nullptr;
-        }
         if (!sp) {
             failed++;
             // In the folder of an update there are only the SPs moved over: one more not moved.
@@ -1463,7 +1371,6 @@ Loaded load(PlayLayer* pl) {
         }
         out.sps.push_back(sp);
     }
-    checked.reset();
     std::sort(out.sps.begin(), out.sps.end(), [](auto const& a, auto const& b) { return a->x < b->x; });
     readNames(out.sps);
     if (!out.sps.empty()) keepPrints();
@@ -1490,16 +1397,14 @@ Loaded load(PlayLayer* pl) {
 namespace {
 
 // The SP's file as save() writes it, for the open level version: sealed with its hash, which readSP checks
-// before PersistenceAPI reads anything.
+// before it reads anything.
 Result<ByteVector> fileFor(StartPoint const& sp) {
-    // PersistenceAPI writes references to objects by their unique IDs, not their places: but in case.
+    // The game writes references to objects by their unique IDs, not their places: but in case.
     RealObjects real;
-    MemoryStream out;
+    BodyWriter out;
     writeSP(out, sp);
-    if (!out.good()) return Err("can't write it");
-    auto body = out.written();
     std::string error;
-    auto file = compress(ByteSpan(reinterpret_cast<uint8_t const*>(body.data()), body.size()), error);
+    auto file = compress(out.bytes(), error);
     if (!file) return Err(error);
     return Ok(std::move(*file));
 }
@@ -1533,9 +1438,10 @@ bool save(StartPoint const& sp) {
     return true;
 }
 
-void numberObject(PlayLayer* pl, GameObject* obj) {
-    int index = static_cast<int>(pl->m_objects->indexOfObject(obj));
-    if (index >= 0) obj->m_uniqueID = FIRST_OBJECT_ID + index;
+void numberObject(PlayLayer*, GameObject* obj) {
+    static int next = FIRST_SP_OBJECT_ID;
+    if (!obj || (obj->m_uniqueID >= FIRST_SP_OBJECT_ID && obj->m_uniqueID < FIRST_STAND_IN_ID)) return;
+    obj->m_uniqueID = next++;
 }
 
 GameObject* createKeepingIds(int key) {
@@ -1701,14 +1607,7 @@ std::vector<std::shared_ptr<StartPoint>> add(std::vector<ByteSpan> const& files,
             error = written.unwrapErr();
         } else {
             ReadError kind;
-            std::optional<RemapOn> checked;
-            if (auto pl = PlayLayer::get()) checked.emplace(pl, pl->m_objects);
-            g_remap.outside = 0;
             sp = readSP(temp, id, error, kind);
-            if (sp && g_remap.outside > 0) {
-                error = fmt::format("its checkpoint refers to {} objects past the level's", g_remap.outside);
-                sp = nullptr;
-            }
             if (sp) {
                 std::filesystem::rename(temp, path, ec);
                 if (ec) {
@@ -1929,21 +1828,24 @@ std::vector<References> referencesOfSPs() {
     std::sort(files.begin(), files.end());
     for (auto const& [id, path] : files) {
         References refs{id};
-        std::shared_ptr<StartPoint> sp;
-        {
-            RemapOn on(pl, pl->m_objects);
-            if (!on) return out;
-            g_remap.seen = &refs.all;
-            std::string error;
-            ReadError kind;
-            sp = readSP(path, id, error, kind);
-            if (!sp) log::warn("Smoke test: SP file {}: {}", path.filename(), error);
-        }
+        std::string error;
+        ReadError kind;
+        auto sp = readSP(path, id, error, kind);
+        if (!sp) log::warn("Smoke test: SP file {}: {}", path.filename(), error);
         auto index = [](GameObject* obj) { return static_cast<unsigned int>(obj->m_uniqueID - FIRST_OBJECT_ID); };
         if (sp) {
             for (auto const& s : sp->cp->m_vectorSavedObjectStateRef) refs.states.push_back(index(s.m_gameObject));
             for (auto const& s : sp->cp->m_vectorActiveSaveObjectState) refs.states.push_back(index(s.m_gameObject));
             for (auto const& s : sp->cp->m_vectorSpecialSaveObjectState) refs.states.push_back(index(s.m_gameObject));
+            // The game finds objects by their IDs, not through m_objects (2.2091): all = the states and the
+            // players' own references (the portal last gone through, the object snapped to).
+            refs.all = refs.states;
+            for (auto p : {sp->cp->m_player1Checkpoint, sp->cp->m_player2Checkpoint}) {
+                if (!p) continue;
+                for (auto obj : {p->m_lastActivatedPortal, p->m_objectSnappedTo}) {
+                    if (obj) refs.all.push_back(index(obj));
+                }
+            }
         }
         for (auto* list : {&refs.all, &refs.states}) {
             std::sort(list->begin(), list->end());

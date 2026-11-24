@@ -14,8 +14,8 @@
 // Detail Mode) holds level.json (the level version
 // the SPs belong to), names.json (the names players gave them), objects.bin (prints of the version's
 // objects, to move the SPs over when the level is updated) and one sp-<id>.spc file per SP: its
-// auto part and its checkpoint, the checkpoint written with PersistenceAPI in the field order Practice
-// Checkpoint Permanence uses; compressed (zlib) but for a short header.
+// auto part and its checkpoint, the checkpoint as the game's own string (serializeCheckpoint, the way it saves
+// platformer levels); compressed (zlib) but for a short header.
 namespace storage {
     // What load() has to tell the player.
     enum class Notice {
@@ -70,8 +70,8 @@ namespace storage {
     // GameObject::createWithKey, without taking a unique ID from the game's counter: made while the level makes
     // its objects, or before the game adds its own after them, an object of the mod's leaves theirs as they were.
     GameObject* createKeepingIds(int key);
-    // Gives an object the mod adds to the level after its own objects the unique ID of its place in
-    // m_objects, like the level's objects have.
+    // Gives an SP's object a unique ID of the mod's own, which no other object has (the game keys a startpos's
+    // checkpoint by its ID); one that has one keeps it.
     void numberObject(PlayLayer* pl, GameObject* obj);
     // The level's own startposes hidden from other mods (main.cpp). An object for them to get instead of
     // `startPos`, made while the level makes its objects (null if it can't be made).
@@ -81,8 +81,8 @@ namespace storage {
     void hide(PlayLayer* pl, std::vector<std::pair<GameObject*, GameObject*>> const& blanks);
     // The blanks in the startposes' places in m_objects (or the startposes back). Only while the game doesn't
     // go through m_objects itself (restarts, checkpoints, quitting do): main.cpp puts them in for the pause
-    // menu, where Blitzkrieg looks. Storage puts the startposes back while it reads SPs, which refer to
-    // objects by their place.
+    // menu, where Blitzkrieg looks. Storage puts the startposes back while it goes through the level's objects by
+    // their place (prints, SPs of another level version).
     void showBlanks(bool on);
     bool blanksShown();
     // The startposes back in m_objects for good, and let go of, if they're `pl`'s (it's going; a level entered
@@ -127,7 +127,7 @@ namespace storage {
     // Content of the SP's saved file, as in Header; 0 if it can't be read.
     uint64_t contentOf(StartPoint const& sp);
     // SP files (passed through readHeader) loaded and saved under ids from `nextId` on: an SP per file,
-    // null where it didn't work (in the log). Reads the checkpoints, which PersistenceAPI doesn't check.
+    // null where it didn't work (in the log). Reads the checkpoints.
     std::vector<std::shared_ptr<StartPoint>> add(std::vector<geode::ByteSpan> const& files, int& nextId);
     // What put SPs into a version: "Replace all" or deleting them (setAside), or load() for another version
     // of the level.
