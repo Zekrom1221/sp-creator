@@ -520,8 +520,23 @@ void logSwitchers(std::string_view when) {
         for (auto child : CCArrayExt<CCNode*>(node->getChildren())) walk(child);
     };
     if (auto scene = CCDirector::get()->getRunningScene()) walk(scene);
-    log::info("Smoke test: switchers {}: labels [{}], {} SPs, {} objects made, {} deleted SPs' objects spare", when,
-        fmt::join(labels, ", "), g_session.sps.size(), g_session.objectsMade, g_session.retired.size());
+    // GD's own lists of startposes (2.2091), which other mods may take theirs from: all, and those of SPs.
+    std::string lists = "no level";
+    if (auto pl = PlayLayer::get()) {
+        auto count = [](CCArray* a, bool sps) {
+            if (!a) return std::string("none");
+            int n = 0, ofSPs = 0;
+            for (auto o : CCArrayExt<CCObject*>(a)) {
+                n++;
+                if (auto obj = typeinfo_cast<StartPosObject*>(o); obj && spOf(obj)) ofSPs++;
+            }
+            return sps ? fmt::format("{} ({} of SPs)", n, ofSPs) : fmt::format("{}", n);
+        };
+        lists = fmt::format("m_startPosObjects {}, for the current mode {}", count(pl->m_startPosObjects, true),
+            count(pl->getStartPosObjectsForCurrentMode(), true));
+    }
+    log::info("Smoke test: switchers {}: labels [{}], {} SPs, {} objects made, {} deleted SPs' objects spare; {}", when,
+        fmt::join(labels, ", "), g_session.sps.size(), g_session.objectsMade, g_session.retired.size(), lists);
 }
 
 // Other mods' ways in: how Blitzkrieg sees the SPs, another switcher picking an SP and the level start,
@@ -1980,6 +1995,14 @@ void smokeSetting(std::string const& key, std::string const& value) {
         restores.push_back([key, was] { Mod::get()->setSettingValue<std::string>(key, was); });
         mod->setSettingValue<std::string>(key, value);
     }
+    else if (key == "place-sp" || key == "prev-sp" || key == "next-sp" || key == "delete-sp") {
+        // A key named as for "key:" (one, no modifiers).
+        auto setting = std::static_pointer_cast<KeybindSettingV3>(mod->getSetting(key));
+        if (!setting) return log::error("Smoke test: no keybind setting {}", key);
+        auto was = setting->getValue();
+        restores.push_back([setting, was] { setting->setValue(was); });
+        setting->setValue({Keybind(keyNamed(value), KeyboardModifier::None)});
+    }
     else {
         auto was = mod->getSettingValue<bool>(key);
         restores.push_back([key, was] { Mod::get()->setSettingValue<bool>(key, was); });
@@ -2317,6 +2340,168 @@ void nextAction() {
     }
     if (op == "switchers") {
         logSwitchers(rest);
+        return next();
+    }
+    // The level as a platformer one, in memory ("platformer:on"), put back at the end: keys the mod leaves to the game there.
+    if (op == "platformer") {
+        bool was = pl->m_isPlatformer;
+        pl->m_isPlatformer = rest == "on";
+        g_smoke.restores.push_back([was] { if (auto pl = PlayLayer::get()) pl->m_isPlatformer = was; });
+        log::info("Smoke test: platformer {} (was {})", pl->m_isPlatformer, was);
+        return next();
+    }
+    // What player 1 holds as the game has it (left / right), and the SP the attempt is from.
+    if (op == "holding") {
+        auto p = pl->m_player1;
+        log::info("Smoke test: HOLDING {}: left {}, right {}, x {:.1f}, active {}", rest, p->m_holdingLeft, p->m_holdingRight,
+            p->m_position.x, g_session.active ? fmt::format("SP {}", g_session.active->id) : std::string("none"));
+        return next();
+    }
+    // GD's own key bindings (2.2091): what it does on the mod's keys and on A / D, and every action bound with its keys.
+    if (op == "gd_keys") {
+        auto km = GJKeybindManager::sharedState();
+        auto nameOf = [](int a) {
+            auto s = GJKeybindManager::actionToString(a);
+            return std::string(s ? s : "?");
+        };
+        auto actions = [km, nameOf](enumKeyCodes key) {
+            std::vector<std::string> out;
+            for (int a : km->actionsForKey(key, false, false, false)) out.push_back(fmt::format("{} {}", a, nameOf(a)));
+            return fmt::format("[{}]", fmt::join(out, ", "));
+        };
+        for (auto [name, key] : std::initializer_list<std::pair<char const*, enumKeyCodes>>{{"V", KEY_V}, {"Comma", KEY_OEMComma},
+                 {"Period", KEY_OEMPeriod}, {"Delete", KEY_Delete}, {"A", KEY_A}, {"D", KEY_D}, {"Q", KEY_Q}, {"E", KEY_E}}) {
+            log::info("Smoke test: GD KEYS {}: {}", name, actions(key));
+        }
+        std::map<int, std::vector<std::string>> all;
+        for (auto const& [chord, acts] : km->m_chordToActions) {
+            for (int a : acts) all[a].push_back(GJKeybindManager::chordToString(chord));
+        }
+        for (auto const& [a, chords] : all) {
+            log::info("Smoke test: GD KEYS action {} {}: {}", a, nameOf(a), fmt::join(chords, " "));
+        }
+        return next();
+    }
+    // GD's own startposes on the pause menu (2.2091): "label" (its label and index), "browser" (its list of
+    // startposes, what each is), "next" / "prev" (its arrows, through their buttons), "stats" (what the level keeps per
+    // startpos: k135 deaths, k137 attempts).
+    if (op == "gd_pause") {
+        auto pause = CCScene::get()->getChildByType<PauseLayer>(0);
+        if (!pause) {
+            log::error("Smoke test: GD PAUSE {}: no pause menu", rest);
+            return next();
+        }
+        auto what = [](CCObject* o) -> std::string {
+            auto obj = typeinfo_cast<GameObject*>(o);
+            if (!obj) return "not an object";
+            auto spo = typeinfo_cast<StartPosObject*>(obj);
+            auto sp = spo ? spOf(spo) : nullptr;
+            return fmt::format("{} {} at {:.0f}", spo ? "startpos" : fmt::format("object {}", obj->m_objectID),
+                sp ? fmt::format("of SP {}", sp->id) : (spo ? "of the level" : "(not a startpos)"), obj->getPositionX());
+        };
+        auto label = [pause, what, pl] {
+            auto count = [](CCArray* a) { return a ? static_cast<int>(a->count()) : -1; };
+            return fmt::format("label \"{}\", index {}, the game's startpos {}; m_startPosObjects {}, for the current mode {}",
+                pause->m_startposLabel ? std::string(pause->m_startposLabel->getString()) : std::string("none"),
+                pause->m_startPosIndex, pl->m_startPosObject ? what(pl->m_startPosObject) : std::string("none"),
+                count(pl->m_startPosObjects), count(pl->getStartPosObjectsForCurrentMode()));
+        };
+        if (rest == "label") {
+            log::info("Smoke test: GD PAUSE label: {}", label());
+            return next();
+        }
+        if (rest == "stats") {
+            log::info("Smoke test: GD PAUSE stats: k135 \"{}\", k137 \"{}\"", std::string(pl->m_level->m_startPosDeathCounts),
+                std::string(pl->m_level->m_startPosAttemptHistory));
+            return next();
+        }
+        if (rest == "browser") {
+            pause->onShowStartposBrowser(nullptr);
+            return afterFrames(10, [what] {
+                auto browser = CCScene::get()->getChildByType<StartPosBrowser>(0);
+                if (!browser) {
+                    log::error("Smoke test: GD PAUSE browser: no list");
+                    return afterFrames(2, nextAction);
+                }
+                std::vector<std::string> items;
+                if (browser->m_startPosObjects) {
+                    for (auto o : CCArrayExt<CCObject*>(browser->m_startPosObjects)) items.push_back(what(o));
+                }
+                log::info("Smoke test: GD PAUSE browser: {} entries, selected {}: [{}]", items.size(), browser->m_selectedCellIdx,
+                    fmt::join(items, "; "));
+                captureScreen("smoke-gd-browser.png");
+                browser->onClose(nullptr);
+                afterFrames(10, nextAction);
+            });
+        }
+        if (rest == "next" || rest == "prev") {
+            // Its arrows: the buttons that call PauseLayer::onChangeStartpos (the game's own function), left and right.
+            auto target = reinterpret_cast<void*>(geode::base::get() + 0x4d93c0);
+            std::vector<CCMenuItemSpriteExtra*> arrows;
+            std::function<void(CCNode*)> walk = [&](CCNode* n) {
+                if (auto item = typeinfo_cast<CCMenuItemSpriteExtra*>(n)) {
+                    auto sel = item->m_pfnSelector;
+                    void* raw = nullptr;
+                    std::memcpy(&raw, &sel, sizeof raw);
+                    if (raw == target) arrows.push_back(item);
+                }
+                for (auto child : CCArrayExt<CCNode*>(n->getChildren())) walk(child);
+            };
+            walk(pause);
+            std::sort(arrows.begin(), arrows.end(), [](auto a, auto b) {
+                return a->convertToWorldSpaceAR({0, 0}).x < b->convertToWorldSpaceAR({0, 0}).x;
+            });
+            if (arrows.size() != 2) {
+                log::error("Smoke test: GD PAUSE {}: {} arrow buttons", rest, arrows.size());
+                return next();
+            }
+            log::info("Smoke test: GD PAUSE {} (tags {} {}), before: {}", rest, arrows[0]->getTag(), arrows[1]->getTag(), label());
+            arrows[rest == "prev" ? 0 : 1]->activate();
+            return afterFrames(10, [label] {
+                log::info("Smoke test: GD PAUSE after the arrow: {}", label());
+                afterFrames(2, nextAction);
+            });
+        }
+        if (rest == "create") {
+            // Its "create startpos": the popup, and its create button, as is. Only where the menu has GD's startpos
+            // label: creating one updates it (PauseLayer::onChangeStartpos), and with none the game crashes.
+            if (!pause->m_startposLabel) {
+                log::error("Smoke test: GD PAUSE create: the pause menu has no startpos label (no create button either)");
+                return next();
+            }
+            std::vector<CCObject*> before(pl->m_objects->data->arr, pl->m_objects->data->arr + pl->m_objects->count());
+            log::info("Smoke test: GD PAUSE create, before: {} objects; {}", before.size(), label());
+            pause->onCreateStartpos(nullptr);
+            return afterFrames(10, [label, before] {
+                auto popup = CCScene::get()->getChildByType<CreateStartPosPopup>(0);
+                if (!popup) {
+                    log::error("Smoke test: GD PAUSE create: no popup");
+                    return afterFrames(2, nextAction);
+                }
+                popup->onCreate(nullptr);
+                afterFrames(10, [label, before] {
+                    auto pl = PlayLayer::get();
+                    if (!pl) return;
+                    // Where the new objects went in m_objects (at the end, or among the level's), and how many of
+                    // the level's objects are not in their places any more.
+                    std::unordered_set<CCObject*> had(before.begin(), before.end());
+                    std::vector<std::string> added;
+                    size_t moved = 0;
+                    for (unsigned int i = 0; i < pl->m_objects->count(); i++) {
+                        auto obj = pl->m_objects->objectAtIndex(i);
+                        if (!had.contains(obj)) {
+                            added.push_back(fmt::format("{} ({})", i, typeinfo_cast<StartPosObject*>(obj) ? "startpos" : "other"));
+                        }
+                        else if (i >= before.size() || before[i] != obj) moved++;
+                    }
+                    log::info("Smoke test: GD PAUSE create, after: {} objects, new at [{}], {} of the {} before out of their "
+                        "places, blanks in {}; {}", pl->m_objects->count(), fmt::join(added, ", "), moved, before.size(),
+                        storage::blanksShown(), label());
+                    afterFrames(2, nextAction);
+                });
+            });
+        }
+        log::error("Smoke test: GD PAUSE {}: no such step", rest);
         return next();
     }
     // The SP list over the pause menu, and the popup on top closed.
