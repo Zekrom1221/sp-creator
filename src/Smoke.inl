@@ -2378,8 +2378,12 @@ void nextAction() {
     // What player 1 holds as the game has it (left / right), and the SP the attempt is from.
     if (op == "holding") {
         auto p = pl->m_player1;
-        log::info("Smoke test: HOLDING {}: left {}, right {}, x {:.1f}, active {}", rest, p->m_holdingLeft, p->m_holdingRight,
-            p->m_position.x, g_session.active ? fmt::format("SP {}", g_session.active->id) : std::string("none"));
+        // And what the game was given (press(): 1-3 player 1 jump, left, right; 4-6 player 2), the auto part's own.
+        auto holds = [](Holds const& h) { return fmt::format("{}{}{}{}{}{}", +h[1], +h[2], +h[3], +h[4], +h[5], +h[6]); };
+        log::info("Smoke test: HOLDING {}: left {}, right {}, x {:.1f}, active {}; given to the game {}, the auto part {} "
+            "(game {}, player {})", rest, p->m_holdingLeft, p->m_holdingRight, p->m_position.x,
+            g_session.active ? fmt::format("SP {}", g_session.active->id) : std::string("none"), holds(g_rec.holds),
+            g_play.sp && g_play.controlling ? "on" : "off", holds(g_play.gameHolds), holds(g_play.userHolds));
         return next();
     }
     // "gd_action:<id>": one of GD's own actions (GJKeybindManager's ids, 2.2091) pressed and let go, the way its keys reach
