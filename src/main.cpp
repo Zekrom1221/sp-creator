@@ -1274,10 +1274,37 @@ void restartFrom(PlayLayer* pl, Entry to) {
     pl->resetLevel();
 }
 
+// The game's own startpos picker on the pause menu (its arrows and label, 2.2091: in the player's own levels, and
+// in any level with Mega Hack's switcher on) shows where the game starts from now. What it shows is "queued": once
+// it's been used (m_isEditorLevel, so named by the bindings; Mega Hack has it set from the menu's start), resuming
+// and the menu's restart take the game there, as another switcher's pick. The menu was opened before this restart:
+// now it shows this restart's startpos, so the game stays where the mod put it.
+void syncGamePausePicker(PlayLayer* pl) {
+    auto scene = CCScene::get();
+    auto pause = scene ? scene->getChildByType<PauseLayer>(0) : nullptr;
+    if (!pause || !pause->m_startposLabel || !pause->m_startPositions) return;
+    int index = 0;  // none: the level start
+    if (auto now = pl->m_startPosObject) {
+        auto at = pause->m_startPositions->indexOfObject(now);
+        // Not among what it shows: nothing queued, it leaves the game alone.
+        if (at == CC_INVALID_INDEX) {
+            pause->m_isEditorLevel = false;
+            return;
+        }
+        index = static_cast<int>(at) + 1;
+    }
+    bool used = pause->m_isEditorLevel;
+    pause->m_startPosIndex = index;
+    // No sender: no step, the label for the index (and the picker marked used, as it was before).
+    pause->onChangeStartpos(nullptr);
+    pause->m_isEditorLevel = used;
+}
+
 // On the pause menu: the restart at once, behind the menu, the game still paused. The player stands at the
 // spawn, and the game goes on from there however it goes on.
 void restartPaused(PlayLayer* pl, Entry to) {
     restartFrom(pl, std::move(to));
+    syncGamePausePicker(pl);
     // The restart took the blanks out (SPCBlanksOut): back in for as long as the menu is open.
     storage::showBlanks(true);
 }
