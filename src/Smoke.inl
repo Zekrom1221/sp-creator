@@ -2357,6 +2357,20 @@ void nextAction() {
             p->m_position.x, g_session.active ? fmt::format("SP {}", g_session.active->id) : std::string("none"));
         return next();
     }
+    // "gd_action:<id>": one of GD's own actions (GJKeybindManager's ids, 2.2091) pressed and let go, the way its keys reach
+    // the level (UILayer::handleAction): 10016-10018 are its startpos keys (None, Next, Previous), unbound by default.
+    if (op == "gd_action") {
+        int a = utils::numFromString<int>(rest).unwrapOr(0);
+        if (!pl->m_uiLayer) {
+            log::error("Smoke test: GD ACTION {}: no UILayer", a);
+            return next();
+        }
+        auto name = GJKeybindManager::actionToString(a);
+        bool took = pl->m_uiLayer->handleAction(a, true, 0.0);
+        pl->m_uiLayer->handleAction(a, false, 0.0);
+        log::info("Smoke test: GD ACTION {} {}: handled {}", a, name ? name : "?", took);
+        return afterFrames(10, nextAction);
+    }
     // GD's own key bindings (2.2091): what it does on the mod's keys and on A / D, and every action bound with its keys.
     if (op == "gd_keys") {
         auto km = GJKeybindManager::sharedState();
@@ -2408,6 +2422,34 @@ void nextAction() {
         };
         if (rest == "label") {
             log::info("Smoke test: GD PAUSE label: {}", label());
+            return next();
+        }
+        // What the game's list "for the current mode" goes by (getStartPosObjectsForCurrentMode): the level's
+        // dword at +0x4c4 (2: every startpos), practice mode (byte +0x32e0 of the PlayLayer), each startpos's
+        // settings byte at +0x1d9; with the members' own offsets, to name them.
+        if (rest == "why") {
+            auto at = [](void const* o, void const* m) { return reinterpret_cast<uintptr_t>(m) - reinterpret_cast<uintptr_t>(o); };
+            auto byteAt = [](void const* o, uintptr_t off) { return *(reinterpret_cast<uint8_t const*>(o) + off); };
+            auto lvl = pl->m_level;
+            std::vector<std::string> sps;
+            for (auto obj : CCArrayExt<GameObject*>(pl->m_startPosObjects)) {
+                auto spo = typeinfo_cast<StartPosObject*>(obj);
+                auto s = spo ? spo->m_startSettings : nullptr;
+                if (!s) continue;
+                sps.push_back(fmt::format("{} +0x1d9={} disable={} online={} name \"{}\"", what(obj), byteAt(s, 0x1d9),
+                    s->m_disableStartPos, s->m_online, s->m_startPosName));
+            }
+            auto s0 = sps.empty() ? nullptr : typeinfo_cast<StartPosObject*>(pl->m_startPosObjects->objectAtIndex(0));
+            log::info("Smoke test: GD PAUSE why: the pause's byte +0x268 (m_isEditorLevel: the arrows used, for "
+                "getQueuedStartPos) {}, queued {}; level type {} (m_levelType at +{:#x}), dword +0x4c4 {}, practice {} "
+                "(m_isPracticeMode at +{:#x}, byte +0x32e0 {}); settings offsets: m_disableStartPos +{:#x}, m_online +{:#x}; "
+                "startposes [{}]",
+                pause->m_isEditorLevel, pause->getQueuedStartPos() ? what(pause->getQueuedStartPos()) : std::string("none"),
+                static_cast<int>(lvl->m_levelType), at(lvl, &lvl->m_levelType),
+                *reinterpret_cast<int const*>(reinterpret_cast<uint8_t const*>(lvl) + 0x4c4), pl->m_isPracticeMode,
+                at(pl, &pl->m_isPracticeMode), byteAt(pl, 0x32e0),
+                s0 ? at(s0->m_startSettings, &s0->m_startSettings->m_disableStartPos) : 0,
+                s0 ? at(s0->m_startSettings, &s0->m_startSettings->m_online) : 0, fmt::join(sps, "; "));
             return next();
         }
         if (rest == "stats") {

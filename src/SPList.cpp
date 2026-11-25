@@ -911,6 +911,7 @@ protected:
         auto play = CCMenuItemExt::createSpriteExtraWithFrameName("GJ_playBtn2_001.png", 0.32f, [this, sp](auto) {
             this->onPlay(sp);
         });
+        play->setID(fmt::format("{}/play-sp-{}", Mod::get()->getID(), number));
         menu->addChild(play);
         if (sp) {
             auto rename = renameButton([this, sp](auto) { this->onRename(sp); });
