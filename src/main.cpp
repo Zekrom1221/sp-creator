@@ -18,6 +18,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 
 using namespace geode::prelude;
 using text::Msg;
@@ -153,6 +154,7 @@ struct Session {
     // Placed SPs not written yet: writing one takes ~10 ms, so it waits for a moment without gameplay
     // (restart, pause, quit) instead of stuttering right where the player pressed the key.
     std::vector<std::shared_ptr<StartPoint>> unsaved;
+    std::unordered_map<StartPosObject*, std::string> gameNames;  // what the SPs' objects are named in the game (nameSPObjects)
 };
 
 Session g_session;
@@ -1309,6 +1311,65 @@ void restartPaused(PlayLayer* pl, Entry to) {
     storage::showBlanks(true);
 }
 
+// The SPs' objects named as the game shows a startpos (2.2091: in its picker on the pause menu, its list of
+// startposes, the text in the corner from its startpos keys; it puts its own number before the name): "SP 3
+// (45.2%)" as the SP list has it, or the SP's name. The game keeps the name as the level string has it, in base64
+// (StartPosObject::getDisplayName decodes it).
+void nameSPObjects() {
+    auto const& sps = g_session.sps;
+    for (size_t i = 0; i < sps.size(); i++) {
+        auto obj = sps[i]->object;
+        if (!obj || !obj->m_startSettings) continue;
+        // The game's fonts there have Latin letters only: a name in others would come out as boxes.
+        auto const& own = sps[i]->name;
+        bool latin = std::all_of(own.begin(), own.end(), [](char c) { return c >= 0x20 && c < 0x7f; });
+        auto name = own.empty() || !latin ? fmt::format("SP {} ({:.1f}%)", i + 1, sps[i]->percent)
+                                          : fmt::format("{} ({:.1f}%)", own, sps[i]->percent);
+        auto& named = g_session.gameNames[obj];
+        if (named == name) continue;
+        obj->m_startSettings->m_startPosName = ZipUtils::base64URLEncode(name);
+        named = std::move(name);
+    }
+}
+
+// After SPs got other names or numbers with the pause menu open: its picker's label anew, at the same place.
+void renameForGame() {
+    nameSPObjects();
+    auto scene = CCScene::get();
+    auto pause = scene ? scene->getChildByType<PauseLayer>(0) : nullptr;
+    if (!pause || !pause->m_startposLabel || !pause->m_startPositions) return;
+    bool used = pause->m_isEditorLevel;
+    pause->onChangeStartpos(nullptr);
+    pause->m_isEditorLevel = used;
+}
+
+// The startposes the game's own picker and startpos keys go through (2.2091), and Mega Hack's switcher, which hooks
+// this for every startpos: the SPs' objects named first, and without the level's startposes hidden on entering it
+// (the setting) and the objects of deleted SPs, as other mods' switchers are without them. Around every other mod's
+// hook, to leave them out of what those return.
+class $modify(SPCGameStartPoses, GJBaseGameLayer) {
+    static void onModify(auto& self) {
+        if (auto res = self.setHookPriority("GJBaseGameLayer::getStartPosObjectsForCurrentMode", Priority::LastPost); res.isErr()) {
+            log::error("Can't set the priority of the GJBaseGameLayer::getStartPosObjectsForCurrentMode hook: {}", res.unwrapErr());
+        }
+    }
+
+    CCArray* getStartPosObjectsForCurrentMode() {
+        auto all = GJBaseGameLayer::getStartPosObjectsForCurrentMode();
+        if (!all || static_cast<GJBaseGameLayer*>(this) != PlayLayer::get()) return all;
+        nameSPObjects();
+        bool drop = false;
+        for (auto obj : CCArrayExt<StartPosObject*>(all)) drop = drop || storage::isHidden(obj) || isRetired(obj);
+        if (!drop) return all;
+        // A new array: what came back may be the game's own (m_startPosObjects).
+        auto kept = CCArray::create();
+        for (auto obj : CCArrayExt<StartPosObject*>(all)) {
+            if (!storage::isHidden(obj) && !isRetired(obj)) kept->addObject(obj);
+        }
+        return kept;
+    }
+};
+
 // dir -1 / +1 through entries(): the level start, the SPs (and the level's startposes) by position.
 // False when the key isn't for the mod right now (a popup over the pause menu, say), so it goes on to the game.
 bool switchSP(int dir) {
@@ -1468,6 +1529,7 @@ void prepareRestart() {
 
 void remove(SP const& sp) {
     if (auto pl = PlayLayer::get()) removeSP(pl, sp);
+    renameForGame();
 }
 
 RemoveResult remove(std::vector<SP> const& sps, bool save) {
@@ -1490,6 +1552,7 @@ RemoveResult remove(std::vector<SP> const& sps, bool save) {
     }
     for (auto const& sp : gone) dropSP(pl, sp);
     storage::saveNames(g_session.sps);
+    renameForGame();
     out.removed = static_cast<int>(gone.size());
     out.left = static_cast<int>(sps.size() - gone.size());
     log::info("Deleted {} of {} SPs ({}): {} in the level", out.removed, sps.size(), save ? "set aside" : "deleted",
@@ -1500,6 +1563,7 @@ RemoveResult remove(std::vector<SP> const& sps, bool save) {
 void rename(SP const& sp, std::string name) {
     sp->name = std::move(name);
     storage::saveNames(g_session.sps);
+    renameForGame();
 }
 
 double autoPartSeconds() {

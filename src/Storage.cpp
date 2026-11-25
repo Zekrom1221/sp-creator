@@ -22,6 +22,7 @@
 #include <sstream>
 #include <streambuf>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace geode::prelude;
 
@@ -113,6 +114,7 @@ struct Hidden {
 struct HiddenObjects {
     Ref<CCArray> objects;  // the level's m_objects
     std::vector<Hidden> hidden;
+    std::unordered_set<CCObject*> reals;  // the startposes of `hidden`
     bool blanksIn = false;  // storage::showBlanks()
     int shown = 0;          // RealObjects alive
 };
@@ -1801,6 +1803,7 @@ void hide(PlayLayer* pl, std::vector<std::pair<GameObject*, GameObject*>> const&
         if (it == blankOf.end()) continue;
         it->second->m_uniqueID = obj->m_uniqueID;
         g_hidden.hidden.push_back({i, obj, it->second});
+        g_hidden.reals.insert(obj);
     }
     log::info("{} startposes of the level hidden from other mods", g_hidden.hidden.size());
 }
@@ -1809,6 +1812,10 @@ void showBlanks(bool on) {
     if (g_hidden.blanksIn == on) return;
     g_hidden.blanksIn = on;
     if (g_hidden.shown == 0) putHidden(on);
+}
+
+bool isHidden(CCObject* obj) {
+    return g_hidden.reals.contains(obj);
 }
 
 bool blanksShown() {

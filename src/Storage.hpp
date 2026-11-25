@@ -87,6 +87,8 @@ namespace storage {
     // Once the level has made its objects (after load()): the startposes of `blanks`, each with its blank, to
     // hide in m_objects too, where Blitzkrieg looks for startposes.
     void hide(PlayLayer* pl, std::vector<std::pair<GameObject*, GameObject*>> const& blanks);
+    // `obj` is one of the level's startposes hidden by hide().
+    bool isHidden(cocos2d::CCObject* obj);
     // The blanks in the startposes' places in m_objects (or the startposes back). Only while the game doesn't
     // go through m_objects itself (restarts, checkpoints, quitting do): main.cpp puts them in for the pause
     // menu, where Blitzkrieg looks. Storage puts the startposes back while it goes through the level's objects by
