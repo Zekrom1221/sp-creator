@@ -2329,6 +2329,31 @@ void nextAction() {
         CCDirector::get()->replaceScene(MenuLayer::scene(false));
         return afterFrames(120, finishSmokeTest);
     }
+    // Out of the level past onQuit, the main menu put in its place as "pause_menu" does (as some ways out go: the pause
+    // menu's Edit in the player's own levels, another mod's own exit), then into a level again ("menu_reenter" the same
+    // one, "menu_reenter:<id or name>" another), the script going on there: what the mod kept of the level left that way.
+    if (op == "menu_reenter") {
+        GJGameLevel* level = rest.empty() ? t.level.data() : smokeLevel(rest);
+        if (!level) {
+            log::error("Smoke test: menu_reenter: no level {}", rest);
+            return next();
+        }
+        t.reentering = true;
+        t.wait = SmokeTest::Wait::None;
+        t.stepsLeft = -1;
+        t.placeAtX.clear();
+        t.placed = 0;
+        t.level = level;
+        log::info("Smoke test: into the main menu past onQuit, then into \"{}\": {} SPs in the session, {} unsaved",
+            level->m_levelName, g_session.sps.size(), g_session.unsaved.size());
+        CCDirector::get()->replaceScene(MenuLayer::scene(false));
+        afterFrames(150, [] {
+            log::info("Smoke test: entering \"{}\" from the main menu (PlayLayer {})", g_smoke.level->m_levelName,
+                PlayLayer::get() ? "still there" : "gone");
+            CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false));
+        });
+        return;
+    }
     if (op == "resume" || op == "pause_restart" || op == "pause_practice" || op == "pause_normal") {
         auto pause = CCScene::get()->getChildByType<PauseLayer>(0);
         if (!pause) log::error("Smoke test: no pause menu");
@@ -2574,12 +2599,14 @@ void nextAction() {
         bool musicPaused = false;
         if (audio->m_backgroundMusicChannel) audio->m_backgroundMusicChannel->getPaused(&musicPaused);
         log::info("Smoke test: STATE {}: paused {}, active {}, startpos {}, player {:.1f},{:.1f}, camera {:.1f},{:.1f}, "
-            "step {}, auto part {}, attempt {}, music {} ms, music paused {}", rest, pl->m_isPaused, activeLabel(),
+            "step {}, auto part {}, attempt {}, music {} ms, music paused {}; level: best {}%, attempts {}, completed now {}, "
+            "test mode {}", rest, pl->m_isPaused, activeLabel(),
             spOf(pl->m_startPosObject) ? fmt::format("of SP {}", spOf(pl->m_startPosObject)->id)
             : (pl->m_startPosObject ? "of the level" : "none"), pl->m_player1->getPositionX(), pl->m_player1->getPositionY(),
             pl->m_gameState.m_cameraPosition.x, pl->m_gameState.m_cameraPosition.y, g_rec.step,
             g_play.sp ? fmt::format("of SP {} at step {}", g_play.sp->id, g_play.step) : "none", pl->m_attempts,
-            audio->getMusicTimeMS(0), musicPaused);
+            audio->getMusicTimeMS(0), musicPaused, pl->m_level->m_normalPercent.value(), pl->m_level->m_attempts.value(),
+            pl->m_hasCompletedLevel, pl->m_isTestMode);
         return next();
     }
     // The mod's switcher: what it goes through (* where restarts go now), the startpos the game has, test mode, whose

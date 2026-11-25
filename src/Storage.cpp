@@ -2111,6 +2111,72 @@ ByteVector variantOf(ByteSpan file, std::string_view how) {
         log::error("Smoke test: no variant {}: not a compressed SP file ({})", how, error);
         return ByteVector(file.begin(), file.end());
     }
+    // Whole and sealed, of this level, but its checkpoint string (the game's own, read by deserializeCheckpoint) made
+    // wrong: "cpgarbage" (every character one of 0-9 , | : ~ . -), "cphalf" (cut to half), "cpnines" (every number
+    // 999999999), "cpzero" (just "0"); or "nanframes": the auto part's frames with NaN for player 1's y and speed.
+    if (how.starts_with("cp") || how == "nanframes") {
+        ByteVector b(body.begin(), body.end());
+        auto u32 = [&b](size_t at) {
+            uint32_t v = 0;
+            if (at + 4 <= b.size()) std::memcpy(&v, b.data() + at, 4);
+            return v;
+        };
+        constexpr size_t FRAME_BYTES = 4 + 2 * (4 + 8 + 4) + 1 + 4 + 4;
+        constexpr size_t INPUT_BYTES = 4 + 4 + 1 + 1;
+        size_t at = HEADER_SIZE + 4 + 6;
+        uint32_t frames = u32(at);
+        size_t framesAt = at + 4;
+        at = framesAt + frames * FRAME_BYTES;
+        uint32_t inputs = u32(at);
+        at += 4 + inputs * INPUT_BYTES;
+        uint32_t size = u32(at);
+        size_t textAt = at + 4;
+        if (textAt + size > b.size()) {
+            log::error("Smoke test: no variant {}: the checkpoint isn't where it should be", how);
+            return ByteVector(file.begin(), file.end());
+        }
+        std::string text(b.begin() + textAt, b.begin() + textAt + size);
+        if (how == "cpgarbage") {
+            uint32_t x = 7;
+            for (auto& c : text) c = "0123456789,|:~.-"[(x = x * 1664525 + 1013904223) >> 28];
+        }
+        else if (how == "cphalf") text.resize(text.size() / 2);
+        else if (how == "cpnines") {
+            std::string out;
+            for (size_t i = 0; i < text.size();) {
+                if (text[i] >= '0' && text[i] <= '9') {
+                    while (i < text.size() && text[i] >= '0' && text[i] <= '9') i++;
+                    out += "999999999";
+                }
+                else out += text[i++];
+            }
+            text = std::move(out);
+        }
+        else if (how == "cpzero") text = "0";
+        else if (how == "nanframes") {
+            float nanF = NAN;
+            double nanD = NAN;
+            for (uint32_t k = 0; k < frames; k++) {
+                std::memcpy(b.data() + framesAt + k * FRAME_BYTES + 4, &nanF, 4);
+                std::memcpy(b.data() + framesAt + k * FRAME_BYTES + 8, &nanD, 8);
+            }
+        }
+        else {
+            log::error("Smoke test: no variant {}", how);
+            return ByteVector(file.begin(), file.end());
+        }
+        ByteVector changed(b.begin(), b.begin() + at);
+        auto newSize = static_cast<uint32_t>(text.size());
+        auto sizeBytes = reinterpret_cast<uint8_t const*>(&newSize);
+        changed.insert(changed.end(), sizeBytes, sizeBytes + 4);
+        changed.insert(changed.end(), text.begin(), text.end());
+        changed.insert(changed.end(), b.begin() + textAt + size, b.end());
+        log::info("Smoke test: variant {}: checkpoint of {} chars -> {} (\"{}...\"), {} frames", how, size, text.size(),
+            text.substr(0, 40), frames);
+        auto kept = compress(changed, error);
+        if (!kept) log::error("Smoke test: variant {}: {}", how, error);
+        return kept ? std::move(*kept) : ByteVector(file.begin(), file.end());
+    }
     if (how == "flat") {
         // Its header, then 4 MB of zeros: compresses far more than SPs do, so it's kept as it is.
         ByteVector flat(body.begin(), body.begin() + HEADER_SIZE);
