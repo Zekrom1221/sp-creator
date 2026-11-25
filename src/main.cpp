@@ -917,7 +917,7 @@ std::vector<char const*> portalStateBack(GJGameState& gs, GJGameState const& c) 
         now = was;
         back.push_back(name);
     };
-    // 2.2081's m_unkPoint5, 6, 7, 10, 11, 17: the same places (bindings 2.2091 name them).
+    // 2.2081's m_unkPoint5, 6, 7, 10, 11, 17, m_unkInt14, m_unkBool7: the same places (bindings 2.2091 name them).
     field(gs.m_staticCameraStart, c.m_staticCameraStart, "staticCameraStart");
     field(gs.m_staticCameraPosition, c.m_staticCameraPosition, "staticCameraPosition");
     field(gs.m_staticCameraTarget, c.m_staticCameraTarget, "staticCameraTarget");
@@ -926,8 +926,8 @@ std::vector<char const*> portalStateBack(GJGameState& gs, GJGameState const& c) 
     field(gs.m_staticCameraActive, c.m_staticCameraActive, "staticCameraActive");
     field(gs.m_lastModeHeight, c.m_lastModeHeight, "lastModeHeight");
     field(gs.m_portalY, c.m_portalY, "portalY");
-    field(gs.m_unkInt14, c.m_unkInt14, "unkInt14");
-    field(gs.m_unkBool7, c.m_unkBool7, "unkBool7");
+    field(gs.m_flyCameraTargetY, c.m_flyCameraTargetY, "flyCameraTargetY");
+    field(gs.m_flyGroundActive, c.m_flyGroundActive, "flyGroundActive");
     field(gs.m_lastActivatedPortal1, c.m_lastActivatedPortal1, "lastActivatedPortal1");
     field(gs.m_lastActivatedPortal2, c.m_lastActivatedPortal2, "lastActivatedPortal2");
     field(gs.m_dualAnimationProgress, c.m_dualAnimationProgress, "dualAnimationProgress");

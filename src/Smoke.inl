@@ -44,6 +44,7 @@ struct RefRow {
 struct SmokeTest {
     bool trace = false;        // "trace:on": every step of an auto part logged (TRACE)
     bool speedLog = false;     // "speed_log:on": every change of player 1's speed logged (SPEED)
+    bool lookLog = false;      // "look_log:on": how player 1 looks as a robot or spider, on each change (LOOK)
     int autoPartPresses = 0;   // presses that came in while the auto part had the buttons (another mod's clicker)
     bool snapshots = true;     // "snapshots:off": the mod makes no hidden checkpoints (no SPs can be placed then)
     float watchX = NAN;        // "watch:<x>": the speed portals placed at this x, where they are, every few steps
@@ -2435,6 +2436,10 @@ void nextAction() {
         g_smoke.speedLog = rest == "on";
         return next();
     }
+    if (op == "look_log") {
+        g_smoke.lookLog = rest == "on";
+        return next();
+    }
     // The next hit outside an auto part a real death (no noclip): another mod's switch after death, a respawn.
     if (op == "die_next") {
         t.dying = true;
@@ -2891,8 +2896,41 @@ void probeStep(PlayLayer* pl) {
     p.left = 0;
 }
 
+// How player 1 looks as a robot or spider, against its state: upside down or not, and the parts that draw it (the
+// player, its main layer, the robot's and spider's sprites: scale, rotation, flips). Logged on each change, and once
+// more with `when` (a restart). A few snapshots of the screen at the first steps after a restart from an SP.
+void logLook(PlayLayer* pl, std::string_view when = {}) {
+    auto p = pl->m_player1;
+    static std::string last;
+    static int shots = 0;
+    if (!p || (!p->m_isRobot && !p->m_isSpider)) {
+        last.clear();
+        return;
+    }
+    auto node = [](CCNode* n) -> std::string {
+        if (!n) return "-";
+        auto s = typeinfo_cast<CCSprite*>(n);
+        return fmt::format("{:.2f},{:.2f} r{:.0f}{}{}{}", n->getScaleX(), n->getScaleY(), n->getRotation(),
+            s && s->isFlipX() ? " fx" : "", s && s->isFlipY() ? " fy" : "", n->isVisible() ? "" : " hidden");
+    };
+    auto look = fmt::format("upside {}, {}, player {}, main layer {}, robot {}, spider {}", p->m_isUpsideDown, modeOf(pl),
+        node(p), node(p->m_mainLayer), node(p->m_robotSprite), node(p->m_spiderSprite));
+    bool shot = g_play.sp && g_play.controlling && (g_play.step == 1 || g_play.step == 60) && shots < 16;
+    if (look == last && when.empty() && !shot) return;
+    last = look;
+    auto where = g_play.sp ? fmt::format("SP {} {} step {}", g_play.sp->id, g_play.controlling ? "auto part" : "after the handoff",
+        g_play.step) : std::string("no SP");
+    log::info("Smoke test: LOOK{} step {} x {:.1f} ({}): {}", when.empty() ? "" : fmt::format(" {}", when), g_rec.step,
+        p->m_position.x, where, look);
+    if (shot) {
+        captureScreen(fmt::format("smoke-look-sp{}-step{}.png", g_play.sp->id, g_play.step));
+        shots++;
+    }
+}
+
 void beforeStep(PlayLayer* pl) {
     if (g_smoke.active) {
+        if (g_smoke.lookLog) logLook(pl);
         // Every change of a step's time (stepUnit: another tick rate) or of the time warp.
         static double lastUnit = 1;
         static float lastWarp = 1;
@@ -3030,6 +3068,7 @@ void restarted(PlayLayer* pl) {
         g_smoke.click.jumpAt = g_smoke.click.fixedAt;
     }
     if (g_smoke.externalOn || g_smoke.logRestarts) logRestart(pl, "restart");
+    if (g_smoke.lookLog) logLook(pl, "restart");
     if (g_smoke.meddle && g_play.sp) {
         auto p = pl->m_player1;
         if (p->m_isShip) p->toggleFlyMode(false, true);
