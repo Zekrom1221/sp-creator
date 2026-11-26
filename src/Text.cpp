@@ -77,6 +77,7 @@ constexpr std::array<Entry, static_cast<size_t>(Msg::Count)> TEXTS = {{
     {"SPs imported: {}, but {} of yours couldn't be deleted", "Импортировано SP: {}, но {} твоих не удалились"},
     {"All SPs from the file are already here", "Все SP из файла уже есть"},
     {"Not an SP Creator file", "Это не файл SP Creator"},
+    {"Couldn't read the file", "Не получилось прочитать файл"},
     {"Made by a newer SP Creator: update the mod", "Файл из новой версии SP Creator: обнови мод"},
     {"The file is damaged", "Файл повреждён"},
     {"The file is too big", "Файл слишком большой"},

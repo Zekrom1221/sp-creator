@@ -125,10 +125,17 @@ namespace storage {
     // Were they made in GD 2.2081 for the open level's version (on this platform)? Then convertFiles2081 makes them
     // this game's.
     bool fits2081(matjson::Value const& identity);
-    // SP files of GD 2.2081 of that identity, each as this game's file of the open level version (as fileOf()
-    // gives them), or nothing where it can't be (in the log).
+    // Made in GD 2.2081 at all (on this platform), whatever level version?
+    bool made2081(matjson::Value const& identity);
+    // SPs of GD 2.2081 made for the player's own level with the key `plainKey` (without the Low Detail Mode suffix)
+    // and the name `name`: the open one, its key since changed (2.2091 prints some objects otherwise)? It is if they
+    // fit its version (fits2081()) and the SPs it had then were moved over with that key, or, without those to
+    // tell, it has the same name.
+    bool ownLevel2081(std::string const& plainKey, std::string const& name, matjson::Value const& identity);
+    // SP files of GD 2.2081 of that identity, made for the level key `plainKey`, each as this game's file of the
+    // open level version (as fileOf() gives them), or nothing where it can't be (in the log).
     std::vector<std::optional<geode::ByteVector>> convertFiles2081(matjson::Value const& identity,
-        std::vector<geode::ByteVector> const& files);
+        std::string const& plainKey, std::vector<geode::ByteVector> const& files);
     // The SP's file as saved (write SPs not saved yet first).
     geode::Result<geode::ByteVector> fileOf(StartPoint const& sp);
     // An SP file, checked as far as it can be without reading its checkpoint: whole, of this format and

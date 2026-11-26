@@ -176,13 +176,20 @@ std::filesystem::path withExtension(std::filesystem::path path) {
 // Is the file's level the open one, the same version, the same mode? The error says how it isn't.
 Result<> checkLevel(matjson::Value const& level, storage::LevelInfo const& open) {
     auto key = level["key"].asString().unwrapOr("");
+    auto name = level["name"].asString().unwrapOr("?");
     auto const& identity = level["identity"];
-    if (withoutLowDetail(key) != withoutLowDetail(open.key)) {
-        return Err(text::format(Msg::OtherLevel, level["name"].asString().unwrapOr("?")));
+    // The player's own level goes by its objects: in GD 2.2081 it had another key.
+    if (withoutLowDetail(key) != withoutLowDetail(open.key) &&
+        !storage::ownLevel2081(std::string(withoutLowDetail(key)), name, identity)) {
+        return Err(text::format(Msg::OtherLevel, name));
     }
-    if (key != open.key) return fail(key.ends_with(LOW_DETAIL_SUFFIX) ? Msg::ForLowDetail : Msg::ForFullDetail);
-    // Made in GD 2.2081 for this level version: open() converts them.
+    if (key.ends_with(LOW_DETAIL_SUFFIX) != open.key.ends_with(LOW_DETAIL_SUFFIX)) {
+        return fail(key.ends_with(LOW_DETAIL_SUFFIX) ? Msg::ForLowDetail : Msg::ForFullDetail);
+    }
+    // Made in GD 2.2081 for this level version: open() converts them. For another version of it: that's what's wrong,
+    // not the game.
     if (storage::fits2081(identity)) return Ok();
+    if (storage::made2081(identity)) return fail(Msg::OtherVersion);
     if (identity["game"] != open.identity["game"]) {
         return Err(text::format(Msg::OtherGame, identity["game"].asString().unwrapOr("?")));
     }
@@ -320,16 +327,17 @@ Result<Pack> open(std::filesystem::path const& path) {
     auto level = storage::level();
     if (!level) return fail(storage::offMsg());
     std::error_code ec;
+    // One that can't be read at all (gone, no access, held by another program) isn't said to be another kind of file.
     auto size = std::filesystem::file_size(path, ec);
     if (ec) {
         log::error("Import: {}: {}", path, ec.message());
-        return fail(Msg::NotAPack);
+        return fail(Msg::CantReadFile);
     }
     if (size > MAX_PACK_SIZE) return fail(Msg::PackTooBig);
     auto data = disk::readBinary(path);
     if (data.isErr()) {
         log::error("Import: {}: {}", path, data.unwrapErr());
-        return fail(Msg::NotAPack);
+        return fail(Msg::CantReadFile);
     }
     // Anything can come in a file someone sent: whatever throws on the way means it's no good.
     try {
@@ -356,7 +364,8 @@ Result<Pack> open(std::filesystem::path const& path) {
         // SPs of GD 2.2081: as this game's files (those that can't be stay as they are, and come out damaged).
         auto const& identity = manifest["level"]["identity"];
         if (storage::fits2081(identity)) {
-            auto converted = storage::convertFiles2081(identity, files);
+            auto key = manifest["level"]["key"].asString().unwrapOr("");
+            auto converted = storage::convertFiles2081(identity, std::string(withoutLowDetail(key)), files);
             int done = 0;
             for (size_t f = 0; f < files.size(); f++) {
                 if (!converted[f]) continue;

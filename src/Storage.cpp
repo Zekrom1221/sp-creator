@@ -1177,12 +1177,17 @@ std::vector<GameObject*> objectsByPlace(PlayLayer* pl) {
     return out;
 }
 
+// Where SPs of GD 2.2081 are kept as they were once moved over (keepOriginal2081()).
+std::filesystem::path originals2081Root() {
+    auto root = g_root;
+    root += "-2.2081";
+    return disk::saveDir() / root;
+}
+
 // Folders of SPs of GD 2.2081 are kept as they were, by the storage (<root>-2.2081): out of the player's way (Versions,
 // the storage manager), in case they have to be read again.
 bool keepOriginal2081(std::filesystem::path const& dir, bool move) {
-    auto root = g_root;
-    root += "-2.2081";
-    root = disk::saveDir() / root;
+    auto root = originals2081Root();
     std::error_code ec;
     std::filesystem::create_directories(root, ec);
     auto to = root / dir.filename();
@@ -1896,13 +1901,39 @@ bool fits2081(matjson::Value const& identity) {
     return !g_level.dir.empty() && PlayLayer::get() && from2081(identity, g_level.info) && sameVersion(identity, g_level.info);
 }
 
-std::vector<std::optional<ByteVector>> convertFiles2081(matjson::Value const& identity, std::vector<ByteVector> const& files) {
+bool made2081(matjson::Value const& identity) {
+    return !g_level.dir.empty() && from2081(identity, g_level.info);
+}
+
+bool ownLevel2081(std::string const& plainKey, std::string const& name, matjson::Value const& identity) {
+    if (!g_level.key.starts_with("editor-") || !plainKey.starts_with("editor-") || !fits2081(identity)) return false;
+    // Its SPs of 2.2081 were moved over, and their folder, kept as it was, has the key they were made with.
+    std::error_code ec;
+    auto aside = g_level.key + "-" + std::string(OLD) + "-";
+    auto root = originals2081Root();
+    for (auto it = std::filesystem::directory_iterator(root, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (!nameOf(it->path()).starts_with(aside)) continue;
+        auto saved = disk::readJson(it->path() / "level.json");
+        if (saved.isOk() && saved.unwrap()["key2081"].asString().unwrapOr("") == plainKey) {
+            log::info("{}: SPs of GD {} of {}: the key this level had then ({})", g_level.key, GAME_2081, plainKey, it->path().filename());
+            return true;
+        }
+    }
+    // Nothing kept to tell (moved to another computer, say): the level of that name, version and objects, as
+    // findOwnLevel2081() finds it without prints.
+    if (name != g_level.name) return false;
+    log::info("{}: SPs of GD {} of {}: the same name, version and number of objects", g_level.key, GAME_2081, plainKey);
+    return true;
+}
+
+std::vector<std::optional<ByteVector>> convertFiles2081(matjson::Value const& identity, std::string const& plainKey,
+    std::vector<ByteVector> const& files) {
     std::vector<std::optional<ByteVector>> out(files.size());
     auto pl = PlayLayer::get();
     if (!fits2081(identity)) return out;
     RealObjects real;
     OldPlaces places(pl, objectsByPlace(pl));
-    uint64_t stamp = levelStamp(g_level.plainKey, identity);
+    uint64_t stamp = levelStamp(plainKey, identity);
     for (size_t f = 0; f < files.size(); f++) {
         std::string error;
         ByteVector unpacked;

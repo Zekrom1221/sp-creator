@@ -64,6 +64,7 @@ namespace text {
         NotDeleted,       // {imported} {not deleted}
         AllAlreadyHere,
         NotAPack,
+        CantReadFile,
         NewerFormat,
         PackDamaged,
         PackTooBig,
