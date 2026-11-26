@@ -1172,13 +1172,21 @@ Entry pastDeleted(StartPosObject* obj) {
     return to;
 }
 
+// Not once the level's end animation has started, as the game's own startpos keys (UILayer::handleAction) and pause
+// aren't: the animation ends in PlayLayer::levelComplete whatever restart comes in between, and in an attempt from
+// the level start that's a completion, with that attempt's few seconds for the time of the level (its timestamp:
+// percents by time stay at 100% from then on).
 bool canUseKeys(PlayLayer* pl) {
-    return pl && pl->m_player1 && !pl->m_isPaused && !pl->m_hasCompletedLevel && !pl->m_isPlatformer;
+    return pl && pl->m_player1 && !pl->m_isPaused && !pl->m_hasCompletedLevel && !pl->m_levelEndAnimationStarted &&
+        !pl->m_isPlatformer;
 }
 
 // On the pause menu itself, nothing open over it (the SP list, a rename, the settings: popups).
 bool canSwitchPaused(PlayLayer* pl) {
-    if (!pl || !pl->m_player1 || !pl->m_isPaused || pl->m_hasCompletedLevel || pl->m_isPlatformer) return false;
+    if (!pl || !pl->m_player1 || !pl->m_isPaused || pl->m_hasCompletedLevel || pl->m_levelEndAnimationStarted ||
+        pl->m_isPlatformer) {
+        return false;
+    }
     auto scene = CCScene::get();
     if (!scene || !scene->getChildByType<PauseLayer>(0)) return false;
     for (auto child : CCArrayExt<CCNode*>(scene->getChildren())) {

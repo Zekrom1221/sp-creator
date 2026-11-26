@@ -2879,6 +2879,25 @@ void nextAction() {
     }
     // Frames on the pause menu, where steps (wait) don't come.
     if (op == "frames") return afterFrames(std::max(1, arg(0, 30)), nextAction);
+    // Until the level's end animation has started ("end_anim:<frames at most>", 1200 by default), frame by frame: for
+    // keys pressed while the player goes into the end.
+    if (op == "end_anim") {
+        int left = std::max(1, arg(0, 1200));
+        struct Waiter {
+            static void check(int left) {
+                auto pl = PlayLayer::get();
+                if (!pl || pl->m_levelEndAnimationStarted || left <= 0) {
+                    log::info("Smoke test: end animation {} at x {:.1f}, completed {}, timestamp {}",
+                        pl && pl->m_levelEndAnimationStarted ? "started" : "not started",
+                        pl ? pl->m_player1->getPositionX() : 0.f, pl && pl->m_hasCompletedLevel,
+                        pl ? pl->m_level->m_timestamp : 0);
+                    return nextAction();
+                }
+                afterFrames(1, [left] { check(left - 1); });
+            }
+        };
+        return Waiter::check(left);
+    }
     // The level's objects in the camera's view, and how many the game has shown (it shows and hides them as the
     // camera goes).
     if (op == "in_view") {
