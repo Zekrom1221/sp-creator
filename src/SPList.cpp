@@ -425,9 +425,7 @@ protected:
         setGoldTitle(this, title);
 
         m_input = TextInput::create(200.f, str(Msg::NamePlaceholder), text::font());
-        // The game's own filters are ASCII only; the mod's font has Cyrillic letters too.
-        m_input->setFilter(std::string(getCommonFilterAllowedChars(CommonFilter::Any)) +
-            "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ");
+        m_input->setFilter(text::nameChars());
         // Bytes: room for MAX_NAME_CHARS Cyrillic letters, then cut to that many letters of any kind.
         m_input->setMaxCharCount(MAX_NAME_CHARS * 2);
         m_input->setCallback([this](std::string const& text) {

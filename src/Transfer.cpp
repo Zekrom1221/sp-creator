@@ -37,7 +37,6 @@ constexpr size_t MAX_SP_FILE_SIZE = 32 * 1024 * 1024;
 // some 400 MB). SP files are compressed, and unpacking more from a file someone sent would hold the game up for long.
 constexpr uint64_t MAX_UNPACKED = 1024ull * 1024 * 1024;
 constexpr size_t MAX_ITEMS = 1000;
-constexpr size_t MAX_NAME_BYTES = 128;
 // An imported SP this close to one of the level's is pointed out: the player may want only one of them.
 constexpr float NEAR_PERCENT = 0.5f;
 constexpr std::string_view LOW_DETAIL_SUFFIX = "-ldm";
@@ -217,7 +216,7 @@ transfer::Pack collect(std::vector<ByteVector>& files, std::vector<std::string> 
         transfer::Item item;
         item.header = header.unwrap();
         item.file = std::move(files[f]);
-        if (f < names.size() && names[f].size() <= MAX_NAME_BYTES) item.name = names[f];
+        if (f < names.size()) item.name = text::cleanName(names[f]);
         item.repeated = !seen.insert(item.header.content).second;
         item.here = owned.contains(item.header.content);
         for (size_t i = 0; i < own.size() && !item.here && !item.repeated; i++) {

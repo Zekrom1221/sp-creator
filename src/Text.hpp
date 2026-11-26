@@ -158,4 +158,15 @@ namespace text {
     char const* titleFont();  // instead of goldFont.fnt
     char const* fontFor(std::string const& str, bool title = false);
     cocos2d::CCLabelBMFont* label(std::string const& str, bool title = false);
+
+    // Letters in a name. The text field counts bytes (a Cyrillic letter is two): fitName() counts letters.
+    constexpr size_t MAX_NAME_CHARS = 48;
+    // Up to MAX_NAME_CHARS letters of `text` (UTF-8), cut between letters: a letter cut off at the end goes.
+    std::string fitName(std::string_view text);
+    // What a name can be typed with (the name field's filter): the game's own characters, and Cyrillic letters in
+    // the mod's font.
+    std::string const& nameChars();
+    // A name from a file (names.json, a version, an import) as the name field would let it be typed: only nameChars(),
+    // no spaces at its ends, fitName(). Empty: no name.
+    std::string cleanName(std::string_view name);
 }

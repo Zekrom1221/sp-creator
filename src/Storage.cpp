@@ -466,8 +466,8 @@ void readNames(std::vector<std::shared_ptr<StartPoint>> const& sps) {
     size_t named = 0;
     for (auto const& sp : sps) {
         auto name = names[fmt::to_string(sp->id)].asString();
-        if (name.isOk() && name.unwrap().size() <= MAX_NAME_BYTES) {
-            sp->name = name.unwrap();
+        if (name.isOk()) {
+            sp->name = text::cleanName(name.unwrap());
             named++;
         }
     }
@@ -1263,7 +1263,7 @@ OtherVersion readOtherVersion(PlayLayer* pl, std::filesystem::path const& dir) {
         int left = sp ? standInIdsIn(serializeCheckpoint(sp->cp)) : 0;
         if (sp && left == 0) {
             auto name = names[fmt::to_string(id)].asString().unwrapOr("");
-            if (name.size() <= MAX_NAME_BYTES) sp->name = std::move(name);
+            sp->name = text::cleanName(name);
             log::info("SP file {} of {} moved over ({} states of objects gone dropped)", path.filename(), dir.filename(), dropped);
             out.sps.push_back(sp);
             continue;
@@ -1489,7 +1489,7 @@ std::vector<storage::Version> versionsOf(std::filesystem::path const& dir, matjs
         v.fits = saved.isOk() && sameLevel(saved.unwrap(), info);
         if (auto meta = disk::readJson(v.dir / VERSION_FILE); meta.isOk()) {
             auto given = meta.unwrap()["name"].asString().unwrapOr("");
-            if (given.size() <= MAX_NAME_BYTES) v.name = std::move(given);
+            v.name = text::cleanName(given);
         }
         out.push_back(std::move(v));
     }
@@ -2319,8 +2319,7 @@ Result<std::vector<VersionSP>> readVersion(Version const& version) {
             log::error("Version {}: can't read {}: {}", version.dir, it->path().filename(), bytes.unwrapErr());
             continue;
         }
-        auto name = names[fmt::to_string(id)].asString().unwrapOr("");
-        if (name.size() > MAX_NAME_BYTES) name.clear();
+        auto name = text::cleanName(names[fmt::to_string(id)].asString().unwrapOr(""));
         found.push_back({id, VersionSP{std::move(bytes).unwrap(), std::move(name)}});
     }
     if (ec) return Err(ec.message());

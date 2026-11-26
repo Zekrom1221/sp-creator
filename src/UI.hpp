@@ -9,8 +9,8 @@
 namespace ui {
     using namespace geode::prelude;
 
-    // Letters in a name. The text field counts bytes (a Cyrillic letter is two): fitName() counts letters.
-    constexpr size_t MAX_NAME_CHARS = 48;
+    using text::fitName;
+    using text::MAX_NAME_CHARS;
     constexpr float DELETE_CONFIRM_SECONDS = 2.5f;
     constexpr ccColor3B WARNING_COLOR = {255, 200, 80}, NOTE_COLOR = {190, 190, 190}, NEAR_COLOR = {255, 170, 60},
         CONFIRM_COLOR = {255, 90, 90};
@@ -27,18 +27,6 @@ namespace ui {
             case storage::AsideFor::OtherLevelVersion: break;
         }
         return str(text::Msg::VersionOld);
-    }
-
-    // Up to MAX_NAME_CHARS letters of `text` (UTF-8), cut between letters: a letter cut off at the end goes.
-    inline std::string fitName(std::string_view text) {
-        size_t end = 0;
-        for (size_t letters = 0; end < text.size() && letters < MAX_NAME_CHARS; letters++) {
-            auto lead = static_cast<unsigned char>(text[end]);
-            size_t size = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
-            if (end + size > text.size()) break;
-            end += size;
-        }
-        return std::string(text.substr(0, end));
     }
 
     // `size` scales all of it.

@@ -1,5 +1,7 @@
 #include "Text.hpp"
 
+#include <Geode/ui/TextInput.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -218,6 +220,57 @@ CCLabelBMFont* label(std::string const& str, bool title) {
     auto label = CCLabelBMFont::create(str.c_str(), font);
     if (title && std::string_view(font) != "goldFont.fnt") label->setColor({255, 210, 60});
     return label;
+}
+
+namespace {
+
+size_t letterSize(unsigned char lead) {
+    return lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+}
+
+void trimSpaces(std::string& s) {
+    auto first = s.find_first_not_of(' ');
+    if (first == std::string::npos) return s.clear();
+    s.erase(s.find_last_not_of(' ') + 1);
+    s.erase(0, first);
+}
+
+}
+
+std::string fitName(std::string_view text) {
+    size_t end = 0;
+    for (size_t letters = 0; end < text.size() && letters < MAX_NAME_CHARS; letters++) {
+        size_t size = letterSize(static_cast<unsigned char>(text[end]));
+        if (end + size > text.size()) break;
+        end += size;
+    }
+    return std::string(text.substr(0, end));
+}
+
+std::string const& nameChars() {
+    // The game's own filters are ASCII only; the mod's font has Cyrillic letters too.
+    static std::string const chars = std::string(getCommonFilterAllowedChars(CommonFilter::Any)) +
+        "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ";
+    return chars;
+}
+
+std::string cleanName(std::string_view name) {
+    auto const& allowed = nameChars();
+    std::string out;
+    for (size_t at = 0; at < name.size();) {
+        auto lead = static_cast<unsigned char>(name[at]);
+        size_t size = letterSize(lead);
+        auto letter = name.substr(at, size);
+        at += size;
+        // Whole letters only (a stray byte of one isn't). The Cyrillic ones are all two bytes, the rest one: a letter
+        // found in `allowed` is one of its letters, not bytes of two.
+        bool whole = letter.size() == size && (size > 1 || lead < 0x80);
+        if (whole && allowed.find(letter) != std::string::npos) out += letter;
+    }
+    trimSpaces(out);
+    out = fitName(out);
+    trimSpaces(out);
+    return out;
 }
 
 }
