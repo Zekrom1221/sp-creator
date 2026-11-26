@@ -155,6 +155,7 @@ struct Session {
     // (restart, pause, quit) instead of stuttering right where the player pressed the key.
     std::vector<std::shared_ptr<StartPoint>> unsaved;
     std::unordered_map<StartPosObject*, std::string> gameNames;  // what the SPs' objects are named in the game (nameSPObjects)
+    PlayLayer* layer = nullptr;                    // the level it's of (none once it's been left)
 };
 
 Session g_session;
@@ -1268,6 +1269,24 @@ void saveUnsaved() {
     g_session.unsaved.clear();
 }
 
+// What leaving the level takes, while its objects still exist (checkpoints point into them): from onQuit, or when it
+// was left some other way (leftWithoutQuit).
+void leaveLevel() {
+    saveUnsaved();
+    storage::leave();
+    g_play = Playback{};
+    g_rec = Recording{};
+    g_session = Session{};
+}
+
+// The level `pl` was left without onQuit, if the session is still its own: another mod put a new scene in its place
+// (it's going), or went from it straight into another level (that one's made before this one goes).
+void leftWithoutQuit(PlayLayer* pl, char const* how) {
+    if (!pl || g_session.layer != pl) return;
+    log::info("The level was left without onQuit ({}): {} SPs placed since the last save", how, g_session.unsaved.size());
+    leaveLevel();
+}
+
 // Restart from `to`, as startpos switchers do.
 void restartFrom(PlayLayer* pl, Entry to) {
     // Practice checkpoints would win over the startpos in resetLevel.
@@ -1911,6 +1930,7 @@ class $modify(SPCBlanksOut, PlayLayer) {
 
     // Left some other way too (a new scene in its place). Not onExit: the game calls that to pause.
     void destructor() {
+        leftWithoutQuit(this, "its scene replaced");
         storage::unhide(this);
         storage::objectsMade(this);
         PlayLayer::~PlayLayer();
@@ -1919,7 +1939,9 @@ class $modify(SPCBlanksOut, PlayLayer) {
 
 class $modify(SPCPlayLayer, PlayLayer) {
     bool init(GJGameLevel* level, bool dontCreateObjects) {
+        leftWithoutQuit(g_session.layer, "straight into another level");
         g_session = Session{};
+        g_session.layer = this;
         g_session.hiding = hideLevelStartPoses();
         g_sessionCount++;
         g_rec = Recording{};
@@ -2028,12 +2050,7 @@ class $modify(SPCPlayLayer, PlayLayer) {
         smoke::quitting();
         // Left while the level was making its objects.
         storage::objectsMade(this);
-        saveUnsaved();
-        storage::leave();
-        // Checkpoints point into the level's objects: let go of them while the level still exists.
-        g_play = Playback{};
-        g_rec = Recording{};
-        g_session = Session{};
+        leaveLevel();
         PlayLayer::onQuit();
     }
 

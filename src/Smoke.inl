@@ -2332,10 +2332,12 @@ void nextAction() {
     // Out of the level past onQuit, the main menu put in its place as "pause_menu" does (as some ways out go: the pause
     // menu's Edit in the player's own levels, another mod's own exit), then into a level again ("menu_reenter" the same
     // one, "menu_reenter:<id or name>" another), the script going on there: what the mod kept of the level left that way.
-    if (op == "menu_reenter") {
+    // "level_reenter" ("level_reenter:<id or name>"): from this level straight into one, no menu between, as a mod with
+    // a "next level" of its own could go: the new level is made before this one goes.
+    if (op == "menu_reenter" || op == "level_reenter") {
         GJGameLevel* level = rest.empty() ? t.level.data() : smokeLevel(rest);
         if (!level) {
-            log::error("Smoke test: menu_reenter: no level {}", rest);
+            log::error("Smoke test: {}: no level {}", op, rest);
             return next();
         }
         t.reentering = true;
@@ -2344,6 +2346,15 @@ void nextAction() {
         t.placeAtX.clear();
         t.placed = 0;
         t.level = level;
+        if (op == "level_reenter") {
+            log::info("Smoke test: straight into \"{}\" past onQuit: {} SPs in the session, {} unsaved",
+                level->m_levelName, g_session.sps.size(), g_session.unsaved.size());
+            // Outside the level's own update, as a button's callback would be.
+            Loader::get()->queueInMainThread([] {
+                CCDirector::get()->replaceScene(PlayLayer::scene(g_smoke.level, false));
+            });
+            return;
+        }
         log::info("Smoke test: into the main menu past onQuit, then into \"{}\": {} SPs in the session, {} unsaved",
             level->m_levelName, g_session.sps.size(), g_session.unsaved.size());
         CCDirector::get()->replaceScene(MenuLayer::scene(false));
