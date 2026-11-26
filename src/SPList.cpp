@@ -707,12 +707,16 @@ protected:
             auto label = CCLabelBMFont::create(sign, "bigFont.fnt");
             auto spr = CircleButtonSprite::create(label, CircleBaseColor::Green, CircleBaseSize::Small);
             // The font has "+" and "-" low in its line, and the button centres the line: the sign itself in the
-            // middle (a letter of a label is a sprite at its own centre).
+            // middle (a letter of a label is a sprite at its own centre). The letter carries its shadow, down and to
+            // the right: its white is up and to the left of its middle, by half the shadow (on screenshots, 0.6 of
+            // the button's units each way).
+            constexpr float HALF_SHADOW = 0.6f;
             auto glyphs = label->getChildren();
             if (auto glyph = glyphs && glyphs->count() ? typeinfo_cast<CCSprite*>(glyphs->objectAtIndex(0)) : nullptr) {
                 auto mid = label->getContentSize() / 2;
                 auto at = glyph->getPosition();
-                spr->setTopOffset(ccp(mid.width - at.x, mid.height - at.y) * label->getScale());
+                spr->setTopOffset(ccp(mid.width - at.x, mid.height - at.y) * label->getScale() +
+                    ccp(HALF_SHADOW, -HALF_SHADOW));
             }
             spr->setScale(0.7f);
             return CCMenuItemExt::createSpriteExtra(spr, [this, dir](auto) { this->set(core::autoPartSeconds() + dir * STEP); });
