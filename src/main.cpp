@@ -1165,7 +1165,9 @@ Entry pastDeleted(StartPosObject* obj) {
         auto it = std::find_if(live.rbegin(), live.rend(), [&](Entry const& e) { return xOf(e) < x; });
         if (it != live.rend()) to = *it;
     }
-    log::info("A switcher picked a deleted SP's object at x {:.1f} (the last attempt from x {:.1f}): on {} to {}", x,
+    // Out of use: a deleted SP's, or one made ahead for SPs to come (madeEarly), which the game itself may pick on
+    // entering the player's own level (its last startpos).
+    log::info("A switcher or the game picked an SP object out of use at x {:.1f} (the last attempt from x {:.1f}): on {} to {}", x,
         from, ahead ? "ahead" : "back", labelOf(to));
     return to;
 }
