@@ -704,8 +704,16 @@ protected:
         float half = m_slider->getContentWidth() / 2;
 
         auto stepButton = [this](char const* sign, int dir) {
-            auto spr = CircleButtonSprite::create(CCLabelBMFont::create(sign, "bigFont.fnt"), CircleBaseColor::Green,
-                CircleBaseSize::Small);
+            auto label = CCLabelBMFont::create(sign, "bigFont.fnt");
+            auto spr = CircleButtonSprite::create(label, CircleBaseColor::Green, CircleBaseSize::Small);
+            // The font has "+" and "-" low in its line, and the button centres the line: the sign itself in the
+            // middle (a letter of a label is a sprite at its own centre).
+            auto glyphs = label->getChildren();
+            if (auto glyph = glyphs && glyphs->count() ? typeinfo_cast<CCSprite*>(glyphs->objectAtIndex(0)) : nullptr) {
+                auto mid = label->getContentSize() / 2;
+                auto at = glyph->getPosition();
+                spr->setTopOffset(ccp(mid.width - at.x, mid.height - at.y) * label->getScale());
+            }
             spr->setScale(0.7f);
             return CCMenuItemExt::createSpriteExtra(spr, [this, dir](auto) { this->set(core::autoPartSeconds() + dir * STEP); });
         };
