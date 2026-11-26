@@ -43,6 +43,11 @@ constexpr size_t SEAL_SIZE = sizeof(uint64_t) + sizeof(END_MARKER);
 constexpr unsigned int MAX_FRAMES = 4000;
 constexpr unsigned int MAX_INPUTS = 4000;
 constexpr int MAX_ID = 1000000;
+// Places and speeds past any level (hours of it): numbers like that, or NaN, crash the game where the player is put
+// (its sections run out, GJBaseGameLayer::addToSection).
+constexpr float MAX_COORD = 1e7f;
+// The SP's checkpoint is taken on the step of the auto part's first frame: the player stands where that frame is.
+constexpr float MAX_SPAWN_OFF = 30.f;
 
 // The game's checkpoint string refers to a level object by its m_uniqueID, and deserializeCheckpoint finds it again
 // by that ID (in GJBaseGameLayer::m_unk3680, ID -> object). That only holds if the level's objects get the same
@@ -482,6 +487,15 @@ void readPlayer(BodyReader& in, PlayerFrame& f) {
     in >> f.rot;
 }
 
+bool inWorld(double v) {
+    return std::isfinite(v) && std::abs(v) <= MAX_COORD;
+}
+
+// Its rotation only finite: it isn't a place, and a ball keeps adding to it.
+bool playerInWorld(PlayerFrame const& f) {
+    return inWorld(f.y) && inWorld(f.yVel) && std::isfinite(f.rot);
+}
+
 // The checkpoint as the game writes it itself (the way it saves platformer levels): its size, then the string.
 // What it keeps was checked against the checkpoint field by field and in play (plan, П1): all a restart needs, the
 // song by its file name only. References to level objects are their unique IDs.
@@ -767,8 +781,9 @@ std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStam
     for (int i = 1; i < 7; i++) in >> sp->holds[i];
     unsigned int frames = 0;
     in >> frames;
-    if (frames == 0 || frames > MAX_FRAMES || !std::isfinite(sp->x) || !std::isfinite(sp->percent)) {
+    if (frames == 0 || frames > MAX_FRAMES || !inWorld(sp->x) || !std::isfinite(sp->percent)) {
         error = fmt::format("{} auto part steps, x {}", frames, sp->x);
+        kind = ReadError::Damaged;
         return nullptr;
     }
     sp->frames.resize(frames);
@@ -779,6 +794,14 @@ std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStam
         in >> f.dual;
         in >> f.camX;
         in >> f.camY;
+    }
+    for (size_t k = 0; k < sp->frames.size(); k++) {
+        auto const& f = sp->frames[k];
+        if (!inWorld(f.x) || !inWorld(f.camX) || !inWorld(f.camY) || !playerInWorld(f.p1) || !playerInWorld(f.p2)) {
+            error = fmt::format("auto part step {}: x {}, player 1 y {} speed {}", k, f.x, f.p1.y, f.p1.yVel);
+            kind = ReadError::Damaged;
+            return nullptr;
+        }
     }
     unsigned int inputs = 0;
     in >> inputs;
@@ -799,6 +822,20 @@ std::shared_ptr<StartPoint> readBody(ByteSpan body, int id, uint64_t versionStam
     }
     sp->cp = from2081 ? readCheckpoint2081(in, *from2081, error) : readCheckpoint(in, error);
     if (!sp->cp) return nullptr;
+    // A checkpoint string that reads but isn't the SP's (made up, or damaged in a way the seal can't see: it seals
+    // what it's given) puts the player wherever it says: garbage has it standing still at x 0.
+    auto spawn = sp->cp->m_player1Checkpoint->m_position;
+    float off = std::abs(spawn.x - sp->frames.front().x);
+#ifdef SPC_SMOKE
+    log::info("Smoke test: SP {} checkpoint at x {:.3f}, auto part from x {:.3f}: off {:.3f}", sp->id, spawn.x,
+        sp->frames.front().x, off);
+#endif
+    if (!inWorld(spawn.x) || !inWorld(spawn.y) || !(off <= MAX_SPAWN_OFF)) {
+        error = fmt::format("its checkpoint has the player at {},{}, its auto part starts at x {}", spawn.x, spawn.y,
+            sp->frames.front().x);
+        kind = ReadError::Damaged;
+        return nullptr;
+    }
     sp->pressHolds = in.left() == 0;
     if (!sp->pressHolds) {
         for (auto& p : sp->pressed) {
