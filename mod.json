@@ -3,7 +3,7 @@
     "gd": {
         "win": "2.2091"
     },
-    "version": "0.9.0",
+    "version": "1.0.0",
     "id": "zekrom.sp-creator",
     "name": "SP Creator",
     "developer": "Zekrom",
@@ -52,7 +52,7 @@
             "type": "bool",
             "default": true,
             "name": "SP switcher keys",
-            "description": "Switch SPs with the two keys below. Other startpos switchers see the SPs too: turn this off if you switch with one of them."
+            "description": "Switch SPs with the two keys below. Other startpos switchers see the SPs too."
         },
         "hide-level-startposes": {
             "type": "bool",
