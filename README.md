@@ -12,8 +12,12 @@ Starting from it replays a short auto part (0.6 s by default) before you take co
 at full speed and with the right camera, the way you'd get there from the level start. The auto part plays back
 your own run, and you can't die in it. Platformer levels have no SPs.
 
-Attempts from your SPs count in the attempt counter, like attempts from any startpos, but they don't save a new
-best or a completion.
+Make your own startpos version of a level, right in the level itself: no need to look for a startpos copy among
+the game's levels or elsewhere. Play the level in practice mode and place SPs where you need them. If a hard
+moment is far from an SP, place another one right before it, and delete it once you've got it down. You train and
+beat the level in the same place, the original: no switching between a startpos copy and the level. Attempts from
+your SPs count in the level's own attempt counter, so there are no attempts to add up from different copies; like
+attempts from any startpos, they don't save a new best or a completion.
 
 Found a bug, or have an idea? [Open an issue](https://github.com/Zekrom1221/sp-creator/issues)
 or [write to the Telegram channel](https://t.me/spcreator_gd?direct).
