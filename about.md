@@ -61,7 +61,9 @@ or SPs and versions of one level, and delete them to free up space.
 - **Startpos switchers** (Mega Hack, Eclipse) list your SPs. An SP placed in the current visit goes to the end of
   their list (and of the game's own startpos list) until you enter the level again. The mod's own <cy>,</c> and
   <cy>.</c> don't need that: they go through all your SPs in order right away, the new ones too. If a level had
-  no SPs when you entered it, Eclipse's switcher may not be there until you enter the level again.
+  no SPs when you entered it, Eclipse's switcher may not be there until you enter the level again. Give
+  Eclipse's switcher keys of its own: on the game's <cy>Start Pos</c> keys or on <cy>,</c> and <cy>.</c>, one press
+  moves two SPs instead of one, since both switch.
 - **Mega Hack**: its switcher uses the game's own startpos list and keys. <cy>Smart StartPos</c> can stay on: SPs
   start the way you placed them.
 - With <cy>Physics Bypass</c>, SPs play the same at any tick rate.

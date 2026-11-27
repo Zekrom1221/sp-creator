@@ -98,6 +98,9 @@ In the mod's settings:
   (*Setup Keybinds* opens the game's keybinds). *Smart StartPos* can stay on: SPs start the way you placed them.
 - **Eclipse** (checked with 1.10.1): its switcher lists your SPs by their names, as the game's own list does. If
   a level had no SPs when you entered it, Eclipse's switcher may not be there until you enter the level again.
+  Give its switcher keys of its own: on the game's *Start Pos: Previous / Next* keys or on the mod's `,` and `.`,
+  one press moves two SPs instead of one, since both switch.
+- **Globed** (checked with 2.3.0): SPs work with other players in the level too.
 - With **Physics Bypass** (Mega Hack, Eclipse), SPs play the same at any tick rate.
 - **Blitzkrieg** (checked on Geometry Dash 2.2081; not out for 2.2091 yet) makes stages of your SPs. After adding
   or deleting SPs, create a new profile with *Bind profile* on: editing a profile keeps its old startposes.
